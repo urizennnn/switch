@@ -1,0 +1,2082 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>charm/docs — A practical guide to Bubble Tea, Bubbles & Lip Gloss</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,800&display=swap"
+    rel="stylesheet">
+
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/go.min.js"></script>
+
+  <style>
+    :root {
+      --bg: #0a0d13;
+      --bg-elevated: #11151d;
+      --bg-code: #0d1017;
+      --border: #1d232e;
+      --border-bright: #2a3140;
+      --text: #e6e4dd;
+      --text-dim: #8b8f9a;
+      --text-faint: #555964;
+      --accent: #ff7849;
+      --accent-soft: #ff7849cc;
+      --teal: #5fc5b0;
+      --gold: #e5c07b;
+      --purple: #a78bfa;
+      --green: #98c379;
+      --code-fg: #c5c8d0;
+      --shadow-warm: 0 0 40px -10px rgba(255, 120, 73, 0.15);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      scroll-padding-top: 80px;
+    }
+
+    body {
+      font-family: 'IBM Plex Mono', monospace;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    /* ─── Background atmosphere ─── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse 800px 600px at 15% 0%, rgba(255, 120, 73, 0.06), transparent),
+        radial-gradient(ellipse 600px 400px at 85% 100%, rgba(95, 197, 176, 0.04), transparent);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, .012) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, .012) 1px, transparent 1px);
+      background-size: 24px 24px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ─── Header ─── */
+    header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 64px;
+      background: rgba(10, 13, 19, 0.85);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--border);
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      padding: 0 32px;
+      gap: 48px;
+    }
+
+    .logo {
+      font-family: 'Fraunces', serif;
+      font-size: 22px;
+      font-weight: 800;
+      font-style: italic;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .logo::before {
+      content: '◆';
+      color: var(--accent);
+      font-size: 14px;
+      font-style: normal;
+    }
+
+    .logo-sub {
+      color: var(--text-dim);
+      font-family: 'IBM Plex Mono';
+      font-size: 11px;
+      font-weight: 400;
+      margin-left: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+    }
+
+    .pkg-tabs {
+      display: flex;
+      gap: 4px;
+      margin-left: auto;
+      background: var(--bg-elevated);
+      padding: 4px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+
+    .pkg-tab {
+      padding: 6px 14px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--text-dim);
+      text-decoration: none;
+      border-radius: 4px;
+      transition: all 0.15s;
+      font-weight: 500;
+    }
+
+    .pkg-tab:hover {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .pkg-tab.active {
+      color: var(--accent);
+      background: rgba(255, 120, 73, 0.08);
+    }
+
+    /* ─── Layout ─── */
+    .layout {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      margin-top: 64px;
+      position: relative;
+      z-index: 1;
+    }
+
+    /* ─── Sidebar ─── */
+    aside {
+      position: sticky;
+      top: 64px;
+      height: calc(100vh - 64px);
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      padding: 32px 0 32px 32px;
+      background: rgba(10, 13, 19, 0.4);
+    }
+
+    aside::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    aside::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    aside::-webkit-scrollbar-thumb {
+      background: var(--border-bright);
+      border-radius: 3px;
+    }
+
+    .nav-group {
+      margin-bottom: 28px;
+    }
+
+    .nav-group-title {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      color: var(--text-faint);
+      margin-bottom: 12px;
+      padding-left: 12px;
+      font-weight: 600;
+    }
+
+    .nav-group-title .accent {
+      color: var(--accent);
+    }
+
+    .nav-group-title .teal {
+      color: var(--teal);
+    }
+
+    .nav-group-title .purple {
+      color: var(--purple);
+    }
+
+    .nav-link {
+      display: block;
+      padding: 6px 12px;
+      color: var(--text-dim);
+      text-decoration: none;
+      font-size: 13px;
+      border-left: 2px solid transparent;
+      transition: all 0.12s;
+    }
+
+    .nav-link:hover {
+      color: var(--text);
+      border-left-color: var(--border-bright);
+    }
+
+    .nav-link.active {
+      color: var(--accent);
+      border-left-color: var(--accent);
+      background: rgba(255, 120, 73, 0.04);
+    }
+
+    /* ─── Main content ─── */
+    main {
+      padding: 48px 64px 120px;
+      max-width: 920px;
+    }
+
+    /* ─── Hero ─── */
+    .hero {
+      padding: 40px 0 80px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 80px;
+    }
+
+    .hero-eyebrow {
+      color: var(--accent);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.25em;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .hero-eyebrow::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: linear-gradient(to right, var(--accent), transparent);
+    }
+
+    .hero h1 {
+      font-family: 'Fraunces', serif;
+      font-size: 56px;
+      line-height: 1.05;
+      font-weight: 600;
+      letter-spacing: -0.03em;
+      margin-bottom: 24px;
+    }
+
+    .hero h1 em {
+      font-style: italic;
+      color: var(--accent);
+      font-weight: 800;
+    }
+
+    .hero-sub {
+      color: var(--text-dim);
+      font-size: 16px;
+      line-height: 1.7;
+      max-width: 640px;
+    }
+
+    .hero-meta {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-top: 48px;
+    }
+
+    .hero-meta-card {
+      border: 1px solid var(--border);
+      background: var(--bg-elevated);
+      padding: 20px;
+      border-radius: 4px;
+      transition: border-color 0.2s;
+    }
+
+    .hero-meta-card:hover {
+      border-color: var(--border-bright);
+    }
+
+    .hero-meta-card-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    .hero-meta-card:nth-child(1) .hero-meta-card-label {
+      color: var(--accent);
+    }
+
+    .hero-meta-card:nth-child(2) .hero-meta-card-label {
+      color: var(--teal);
+    }
+
+    .hero-meta-card:nth-child(3) .hero-meta-card-label {
+      color: var(--purple);
+    }
+
+    .hero-meta-card-name {
+      font-family: 'Fraunces', serif;
+      font-style: italic;
+      font-size: 18px;
+      margin-bottom: 6px;
+      color: var(--text);
+    }
+
+    .hero-meta-card-desc {
+      color: var(--text-dim);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    /* ─── Section ─── */
+    section {
+      margin-bottom: 96px;
+    }
+
+    .section-header {
+      margin-bottom: 48px;
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+      position: relative;
+    }
+
+    .section-eyebrow {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.25em;
+      color: var(--text-faint);
+      margin-bottom: 12px;
+      font-weight: 600;
+    }
+
+    .section-header h2 {
+      font-family: 'Fraunces', serif;
+      font-size: 42px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+      margin-bottom: 16px;
+    }
+
+    .section-header h2 em {
+      font-style: italic;
+    }
+
+    #bubbletea .section-header h2 em {
+      color: var(--accent);
+    }
+
+    #bubbles .section-header h2 em {
+      color: var(--teal);
+    }
+
+    #lipgloss .section-header h2 em {
+      color: var(--purple);
+    }
+
+    .section-tagline {
+      color: var(--text-dim);
+      font-size: 15px;
+      line-height: 1.65;
+      max-width: 640px;
+    }
+
+    /* ─── Article (concept) ─── */
+    article {
+      margin-bottom: 64px;
+      padding-top: 24px;
+    }
+
+    article h3 {
+      font-family: 'Fraunces', serif;
+      font-size: 26px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      letter-spacing: -0.01em;
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+    }
+
+    article h3::before {
+      content: attr(data-num);
+      font-family: 'IBM Plex Mono';
+      font-size: 11px;
+      color: var(--text-faint);
+      font-weight: 400;
+      letter-spacing: 0.1em;
+    }
+
+    article h4 {
+      font-family: 'IBM Plex Mono';
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      color: var(--text);
+      margin: 32px 0 12px;
+      padding-top: 16px;
+      border-top: 1px dashed var(--border);
+    }
+
+    article>p {
+      color: var(--text-dim);
+      margin-bottom: 16px;
+      line-height: 1.75;
+    }
+
+    article p strong,
+    article li strong {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    article p code,
+    article li code,
+    article td code {
+      font-family: 'IBM Plex Mono';
+      font-size: 0.88em;
+      background: rgba(255, 120, 73, 0.08);
+      color: var(--accent);
+      padding: 1px 6px;
+      border-radius: 3px;
+      border: 1px solid rgba(255, 120, 73, 0.15);
+    }
+
+    article ul,
+    article ol {
+      margin: 8px 0 20px 24px;
+      color: var(--text-dim);
+    }
+
+    article li {
+      margin-bottom: 8px;
+      line-height: 1.7;
+    }
+
+    /* ─── Code blocks ─── */
+    pre {
+      background: var(--bg-code) !important;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 20px 24px !important;
+      overflow-x: auto;
+      margin: 16px 0;
+      font-size: 13px;
+      line-height: 1.6;
+      position: relative;
+    }
+
+    pre code {
+      font-family: 'IBM Plex Mono', monospace !important;
+      background: none !important;
+      border: none !important;
+      color: var(--code-fg) !important;
+      padding: 0 !important;
+    }
+
+    pre::before {
+      content: 'go';
+      position: absolute;
+      top: 8px;
+      right: 12px;
+      font-size: 9px;
+      letter-spacing: 0.2em;
+      color: var(--text-faint);
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+
+    pre.bash::before {
+      content: 'bash';
+    }
+
+    pre.terminal::before {
+      content: 'terminal';
+      color: var(--teal);
+    }
+
+    pre::-webkit-scrollbar {
+      height: 6px;
+    }
+
+    pre::-webkit-scrollbar-thumb {
+      background: var(--border-bright);
+      border-radius: 3px;
+    }
+
+    /* hljs overrides for our palette */
+    .hljs-keyword {
+      color: var(--accent) !important;
+    }
+
+    .hljs-type,
+    .hljs-built_in {
+      color: var(--gold) !important;
+    }
+
+    .hljs-string {
+      color: var(--green) !important;
+    }
+
+    .hljs-comment {
+      color: var(--text-faint) !important;
+      font-style: italic;
+    }
+
+    .hljs-number {
+      color: var(--purple) !important;
+    }
+
+    .hljs-function .hljs-title,
+    .hljs-title.function_ {
+      color: var(--teal) !important;
+    }
+
+    .hljs-params {
+      color: var(--code-fg) !important;
+    }
+
+    .hljs-literal {
+      color: var(--purple) !important;
+    }
+
+    /* ─── Callouts ─── */
+    .callout {
+      border-left: 2px solid;
+      padding: 14px 20px;
+      margin: 20px 0;
+      background: var(--bg-elevated);
+      border-radius: 0 4px 4px 0;
+      font-size: 13.5px;
+      line-height: 1.6;
+    }
+
+    .callout-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      font-weight: 600;
+      margin-bottom: 6px;
+      display: block;
+    }
+
+    .callout.use {
+      border-color: var(--teal);
+    }
+
+    .callout.use .callout-label {
+      color: var(--teal);
+    }
+
+    .callout.warn {
+      border-color: var(--gold);
+    }
+
+    .callout.warn .callout-label {
+      color: var(--gold);
+    }
+
+    .callout.tip {
+      border-color: var(--purple);
+    }
+
+    .callout.tip .callout-label {
+      color: var(--purple);
+    }
+
+    .callout p {
+      color: var(--text);
+      margin: 0;
+    }
+
+    /* ─── Tables ─── */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0;
+      font-size: 13px;
+    }
+
+    th,
+    td {
+      text-align: left;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      color: var(--text-faint);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      font-weight: 600;
+      background: var(--bg-elevated);
+    }
+
+    td {
+      color: var(--text-dim);
+      vertical-align: top;
+    }
+
+    td:first-child {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    /* ─── Diagrams ─── */
+    .diagram {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 32px;
+      margin: 24px 0;
+      font-family: 'IBM Plex Mono';
+      font-size: 12px;
+      line-height: 1.8;
+      color: var(--text-dim);
+      overflow-x: auto;
+      box-shadow: var(--shadow-warm);
+    }
+
+    .diagram .arrow {
+      color: var(--accent);
+    }
+
+    .diagram .box {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .diagram .note {
+      color: var(--text-faint);
+      font-style: italic;
+    }
+
+    /* ─── Terminal preview ─── */
+    .term {
+      background: #06080d;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      margin: 16px 0;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    }
+
+    .term-bar {
+      background: var(--bg-elevated);
+      padding: 8px 14px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .term-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--border-bright);
+    }
+
+    .term-dot.r {
+      background: #ed6a5e;
+    }
+
+    .term-dot.y {
+      background: #f5bf4f;
+    }
+
+    .term-dot.g {
+      background: #62c554;
+    }
+
+    .term-title {
+      margin-left: auto;
+      color: var(--text-faint);
+      font-size: 11px;
+    }
+
+    .term-body {
+      padding: 16px 20px;
+      font-family: 'IBM Plex Mono';
+      font-size: 12px;
+      line-height: 1.7;
+      color: var(--text);
+      white-space: pre;
+    }
+
+    .term-body .hl {
+      color: var(--accent);
+    }
+
+    .term-body .dim {
+      color: var(--text-dim);
+    }
+
+    .term-body .kbd {
+      color: var(--teal);
+    }
+
+    /* ─── Quick-jump anchors ─── */
+    .anchor-jump {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px dashed var(--accent-soft);
+      transition: opacity 0.15s;
+    }
+
+    .anchor-jump:hover {
+      opacity: 0.7;
+    }
+
+    /* ─── Footer ─── */
+    footer {
+      margin-top: 120px;
+      padding: 48px 0;
+      border-top: 1px solid var(--border);
+      color: var(--text-faint);
+      font-size: 12px;
+      text-align: center;
+      line-height: 1.8;
+    }
+
+    footer .accent {
+      color: var(--accent);
+    }
+
+    /* ─── Mobile (acceptable degradation) ─── */
+    @media (max-width: 1024px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      aside {
+        display: none;
+      }
+
+      main {
+        padding: 32px 24px 80px;
+      }
+
+      .hero h1 {
+        font-size: 36px;
+      }
+
+      .section-header h2 {
+        font-size: 30px;
+      }
+
+      .pkg-tabs {
+        display: none;
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+  <header>
+    <div class="logo">
+      charm/docs
+      <span class="logo-sub">field guide</span>
+    </div>
+    <nav class="pkg-tabs">
+      <a href="#bubbletea" class="pkg-tab" data-tab="bubbletea">Bubble Tea</a>
+      <a href="#bubbles" class="pkg-tab" data-tab="bubbles">Bubbles</a>
+      <a href="#lipgloss" class="pkg-tab" data-tab="lipgloss">Lip Gloss</a>
+    </nav>
+  </header>
+
+  <div class="layout">
+
+    <aside>
+      <div class="nav-group">
+        <div class="nav-group-title">Start</div>
+        <a class="nav-link" href="#introduction">Introduction</a>
+        <a class="nav-link" href="#three-packages">The three packages</a>
+        <a class="nav-link" href="#install">Install</a>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-group-title"><span class="accent">▸</span>&nbsp; Bubble Tea</div>
+        <a class="nav-link" href="#bt-architecture">The Architecture</a>
+        <a class="nav-link" href="#bt-model">Model</a>
+        <a class="nav-link" href="#bt-init">Init</a>
+        <a class="nav-link" href="#bt-update">Update</a>
+        <a class="nav-link" href="#bt-view">View</a>
+        <a class="nav-link" href="#bt-msgs">Messages</a>
+        <a class="nav-link" href="#bt-cmds">Commands</a>
+        <a class="nav-link" href="#bt-batch">Batch &amp; Sequence</a>
+        <a class="nav-link" href="#bt-program">Program options</a>
+        <a class="nav-link" href="#bt-composition">Composition</a>
+        <a class="nav-link" href="#bt-async">Async work</a>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-group-title"><span class="teal">▸</span>&nbsp; Bubbles</div>
+        <a class="nav-link" href="#b-textinput">textinput</a>
+        <a class="nav-link" href="#b-textarea">textarea</a>
+        <a class="nav-link" href="#b-viewport">viewport</a>
+        <a class="nav-link" href="#b-list">list</a>
+        <a class="nav-link" href="#b-table">table</a>
+        <a class="nav-link" href="#b-spinner">spinner</a>
+        <a class="nav-link" href="#b-progress">progress</a>
+        <a class="nav-link" href="#b-paginator">paginator</a>
+        <a class="nav-link" href="#b-key">key</a>
+        <a class="nav-link" href="#b-help">help</a>
+        <a class="nav-link" href="#b-filepicker">filepicker</a>
+        <a class="nav-link" href="#b-stopwatch">stopwatch / timer</a>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-group-title"><span class="purple">▸</span>&nbsp; Lip Gloss</div>
+        <a class="nav-link" href="#lg-style">Style basics</a>
+        <a class="nav-link" href="#lg-colors">Colors</a>
+        <a class="nav-link" href="#lg-text">Text formatting</a>
+        <a class="nav-link" href="#lg-spacing">Padding &amp; margin</a>
+        <a class="nav-link" href="#lg-borders">Borders</a>
+        <a class="nav-link" href="#lg-dimensions">Width &amp; height</a>
+        <a class="nav-link" href="#lg-alignment">Alignment</a>
+        <a class="nav-link" href="#lg-joining">Joining strings</a>
+        <a class="nav-link" href="#lg-place">Place</a>
+        <a class="nav-link" href="#lg-table">Tables</a>
+        <a class="nav-link" href="#lg-tree">Trees</a>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-group-title">Recipes</div>
+        <a class="nav-link" href="#recipe-chat">A chat layout</a>
+        <a class="nav-link" href="#recipe-loading">Loading state</a>
+        <a class="nav-link" href="#recipe-tabs">Multi-pane focus</a>
+      </div>
+    </aside>
+
+    <main>
+
+      <!-- ════════════════════════════════════════════════════════════════ -->
+      <!--   HERO                                                            -->
+      <!-- ════════════════════════════════════════════════════════════════ -->
+      <section class="hero" id="introduction">
+        <div class="hero-eyebrow">A field guide</div>
+        <h1>The TUI stack, <em>finally</em><br>explained the way you think.</h1>
+        <p class="hero-sub">
+          Bubble Tea, Bubbles, and Lip Gloss are three packages that build terminal interfaces — but the official docs
+          are reference, not teaching. This guide is teaching. Every feature is shown the way you'd actually use it: a
+          one-line description of what it's for, a minimal example that runs, and a note on when to reach for it.
+        </p>
+
+        <div class="hero-meta">
+          <div class="hero-meta-card">
+            <div class="hero-meta-card-label">The framework</div>
+            <div class="hero-meta-card-name">Bubble Tea</div>
+            <div class="hero-meta-card-desc">The event loop. State, updates, render. Like Elm or React, for terminals.
+            </div>
+          </div>
+          <div class="hero-meta-card">
+            <div class="hero-meta-card-label">The widgets</div>
+            <div class="hero-meta-card-name">Bubbles</div>
+            <div class="hero-meta-card-desc">Pre-built components — text input, viewport, list, spinner. Drop them in.
+            </div>
+          </div>
+          <div class="hero-meta-card">
+            <div class="hero-meta-card-label">The styling</div>
+            <div class="hero-meta-card-name">Lip Gloss</div>
+            <div class="hero-meta-card-desc">CSS for strings. Colors, borders, padding, layout. Pure string in, styled
+              string out.</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="three-packages">
+        <div class="section-header">
+          <div class="section-eyebrow">Mental Model</div>
+          <h2>How the <em>three packages</em> fit together</h2>
+          <p class="section-tagline">Once you see this picture, the rest of the framework collapses into common sense.
+            Each package owns one thing, and they only talk through strings.</p>
+        </div>
+
+        <div class="diagram">
+          <span class="box">Bubble Tea</span> drives the event loop <span class="note">// you write
+            Init/Update/View</span>
+          <span class="arrow">│</span>
+          <span class="arrow">▼</span> calls your <span class="box">View()</span>
+          <span class="arrow">│</span>
+          <span class="arrow">▼</span> which assembles strings using ─► <span class="box">Lip Gloss</span> <span
+            class="note">// styles, joins, borders</span>
+          <span class="arrow">│</span> ▲
+          <span class="arrow">▼</span> │
+          uses widgets from ──────────────► <span class="box">Bubbles</span> <span class="note">// each widget renders
+            with Lip Gloss</span>
+          │
+          <span class="arrow">▼</span> each Bubble has its own
+          Init / Update / View — they
+          are nested Bubble Tea models.
+        </div>
+
+        <p>The cleanest way to think about it: <strong>Bubble Tea is the loop, Lip Gloss is the paint, Bubbles are
+            pre-painted widgets.</strong> You can use Lip Gloss without Bubble Tea (just to color a string). You can use
+          Bubble Tea without Bubbles (write your own widgets). But you cannot use Bubbles without both — every Bubble is
+          a tiny Bubble Tea model that paints itself with Lip Gloss.</p>
+
+        <h4>Install</h4>
+        <pre class="bash"><code>go get github.com/charmbracelet/bubbletea
+            go get github.com/charmbracelet/bubbles
+            go get github.com/charmbracelet/lipgloss</code></pre>
+      </section>
+
+
+      <!-- ════════════════════════════════════════════════════════════════ -->
+      <!--   BUBBLE TEA                                                      -->
+      <!-- ════════════════════════════════════════════════════════════════ -->
+      <section id="bubbletea">
+        <div class="section-header">
+          <div class="section-eyebrow">Package one of three</div>
+          <h2><em>Bubble Tea</em> — the framework</h2>
+          <p class="section-tagline">The Elm Architecture, in Go. Your app is a function: <code>(state, event) → (new
+              state, command)</code>. Bubble Tea handles the loop. You write three methods.</p>
+        </div>
+
+        <article id="bt-architecture">
+          <h3 data-num="01">The Architecture</h3>
+          <p>Every Bubble Tea program is a struct that satisfies <code>tea.Model</code>:</p>
+          <pre><code class="language-go">type Model interface {
+              Init() Cmd
+              Update(Msg) (Model, Cmd)
+              View() string
+              }</code></pre>
+          <p>The runtime calls them in this order, forever:</p>
+          <ol>
+            <li><strong>Init</strong> runs once when the program starts. Returns the first command (e.g. "fetch initial
+              data").</li>
+            <li><strong>Update</strong> runs every time something happens — a keypress, a window resize, a tick, a
+              network response. Returns a new model and an optional command.</li>
+            <li><strong>View</strong> runs after every Update. Returns the string to draw on screen.</li>
+          </ol>
+          <p>That's it. Everything in Bubble Tea — every animation, every API call, every keystroke — is just a
+            <code>Msg</code> flowing into <code>Update</code>.</p>
+
+          <div class="callout tip">
+            <span class="callout-label">Why this matters</span>
+            <p>You never call <code>Update</code> or <code>View</code> yourself. The runtime does. You only describe
+              what should happen for each kind of message. State flows in one direction, which is why this scales.</p>
+          </div>
+        </article>
+
+        <article id="bt-model">
+          <h3 data-num="02">Model — your application's state</h3>
+          <p>The model is just a struct. Put everything your app needs to remember in it.</p>
+          <pre><code class="language-go">type model struct {
+              messages []string
+              input string
+              cursor int
+              err error
+              }
+
+              func initialModel() model {
+              return model{
+              messages: []string{},
+              input: "",
+              }
+              }</code></pre>
+          <p>Two questions to ask when designing the model:</p>
+          <ul>
+            <li><strong>If this changed, would the screen look different?</strong> → put it in the model.</li>
+            <li><strong>Is this only used inside one function?</strong> → keep it as a local variable.</li>
+          </ul>
+        </article>
+
+        <article id="bt-init">
+          <h3 data-num="03">Init — the first command</h3>
+          <p>Runs once. Returns a <code>tea.Cmd</code> (or <code>nil</code> if there's nothing to do at startup).</p>
+          <pre><code class="language-go">func (m model) Init() tea.Cmd {
+              // Return nil if nothing needs to run on startup
+              return nil
+              }
+
+              // Or kick off something:
+              func (m model) Init() tea.Cmd {
+              return tea.Batch(
+              loadConfig(), // your custom Cmd
+              spinner.Tick, // start the spinner
+              )
+              }</code></pre>
+          <div class="callout use">
+            <span class="callout-label">Use Init for</span>
+            <p>Loading initial data, starting timers, focusing an input on launch, requesting the window size early.</p>
+          </div>
+        </article>
+
+        <article id="bt-update">
+          <h3 data-num="04">Update — your reducer</h3>
+          <p>Receives every message in the system. Switch on the type, mutate the model, return it.</p>
+          <pre><code class="language-go">func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+              switch msg := msg.(type) {
+
+              case tea.KeyMsg:
+              switch msg.String() {
+              case "ctrl+c", "q":
+              return m, tea.Quit
+              case "enter":
+              m.messages = append(m.messages, m.input)
+              m.input = ""
+              return m, nil
+              }
+
+              case tea.WindowSizeMsg:
+              m.width = msg.Width
+              m.height = msg.Height
+              return m, nil
+              }
+
+              return m, nil
+              }</code></pre>
+          <p>Two contracts you must respect:</p>
+          <ul>
+            <li><strong>Always return a model.</strong> Even if nothing changed, return <code>m</code>.</li>
+            <li><strong>Return a Cmd if you want side effects.</strong> Never make HTTP calls or read files directly
+              inside <code>Update</code> — wrap them in a <code>Cmd</code>. The runtime executes commands off-thread.
+            </li>
+          </ul>
+
+          <div class="callout warn">
+            <span class="callout-label">Common pitfall</span>
+            <p>Calling <code>http.Get</code> directly inside Update will block the entire UI. Wrap it in a
+              <code>tea.Cmd</code>. See <a class="anchor-jump" href="#bt-cmds">Commands</a>.</p>
+          </div>
+        </article>
+
+        <article id="bt-view">
+          <h3 data-num="05">View — render to a string</h3>
+          <p>Pure function. Read the model, return a string. No side effects, no commands.</p>
+          <pre><code class="language-go">func (m model) View() string {
+              var b strings.Builder
+
+              b.WriteString("Messages:\n\n")
+              for _, msg := range m.messages {
+              b.WriteString(" · " + msg + "\n")
+              }
+
+              b.WriteString("\n> " + m.input)
+              return b.String()
+              }</code></pre>
+          <p>The runtime diffs your output and only redraws what changed. You don't optimize this — just return the full
+            string every time.</p>
+        </article>
+
+        <article id="bt-msgs">
+          <h3 data-num="06">Messages — what flows into Update</h3>
+          <p>A <code>tea.Msg</code> is just <code>interface{}</code>. Any type can be a message. Bubble Tea ships with
+            these built-ins:</p>
+          <table>
+            <tr>
+              <th>Message</th>
+              <th>When it fires</th>
+            </tr>
+            <tr>
+              <td><code>tea.KeyMsg</code></td>
+              <td>Every keypress. Use <code>msg.String()</code> for "ctrl+c", "enter", "a", etc.</td>
+            </tr>
+            <tr>
+              <td><code>tea.MouseMsg</code></td>
+              <td>Mouse events (only if mouse mode enabled).</td>
+            </tr>
+            <tr>
+              <td><code>tea.WindowSizeMsg</code></td>
+              <td>Terminal resized. Has <code>.Width</code> and <code>.Height</code>.</td>
+            </tr>
+            <tr>
+              <td><code>tea.QuitMsg</code></td>
+              <td>Sent before the program exits.</td>
+            </tr>
+            <tr>
+              <td><code>tea.FocusMsg</code> / <code>tea.BlurMsg</code></td>
+              <td>Terminal gained/lost focus.</td>
+            </tr>
+          </table>
+          <h4>Custom messages</h4>
+          <p>Define your own types to communicate between async work and Update:</p>
+          <pre><code class="language-go">type chatLoadedMsg struct{ messages []Message }
+              type errMsg struct{ err error }
+
+              func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+              switch msg := msg.(type) {
+              case chatLoadedMsg:
+              m.messages = msg.messages
+              case errMsg:
+              m.err = msg.err
+              }
+              return m, nil
+              }</code></pre>
+        </article>
+
+        <article id="bt-cmds">
+          <h3 data-num="07">Commands — async, the right way</h3>
+          <p>A <code>tea.Cmd</code> is just a function: <code>func() tea.Msg</code>. The runtime calls it in a
+            goroutine, then routes the returned message back into <code>Update</code>.</p>
+          <pre><code class="language-go">func loadChat(id string) tea.Cmd {
+              return func() tea.Msg {
+              chat, err := api.GetChat(id)
+              if err != nil {
+              return errMsg{err}
+              }
+              return chatLoadedMsg{chat.Messages}
+              }
+              }
+
+              // Usage in Update:
+              case tea.KeyMsg:
+              if msg.String() == "enter" {
+              return m, loadChat(m.selectedID)
+              }</code></pre>
+          <p>This is the entire pattern for HTTP calls, DB queries, file I/O, anything that takes time:</p>
+          <ol>
+            <li>Define a custom <code>Msg</code> type for the result.</li>
+            <li>Return a <code>tea.Cmd</code> that does the work and returns that message.</li>
+            <li>Handle the message in <code>Update</code> and update state.</li>
+          </ol>
+
+          <div class="callout tip">
+            <span class="callout-label">Mental model</span>
+            <p>Cmds say "do this thing, then send me a message when you're done." Update never blocks. The UI never
+              freezes.</p>
+          </div>
+        </article>
+
+        <article id="bt-batch">
+          <h3 data-num="08">Batch &amp; Sequence — multiple commands</h3>
+          <p><code>tea.Batch</code> runs commands in parallel. <code>tea.Sequence</code> runs them in order.</p>
+          <pre><code class="language-go">// Run two things at once:
+              return m, tea.Batch(
+              loadMessages(),
+              spinner.Tick,
+              )
+
+              // Run in order (rare — most things should be parallel):
+              return m, tea.Sequence(
+              saveDraft(),
+              sendMessage(),
+              )</code></pre>
+          <p>Built-in helpers you'll see often:</p>
+          <ul>
+            <li><code>tea.Quit</code> — exits the program.</li>
+            <li><code>tea.Tick(time.Second, fn)</code> — fires a message after a delay.</li>
+            <li><code>tea.Every(time.Second, fn)</code> — fires repeatedly. Used by spinners and clocks.</li>
+            <li><code>tea.Println("...")</code> — prints above the running TUI without disturbing it.</li>
+            <li><code>tea.ClearScreen</code> — wipes the screen.</li>
+          </ul>
+        </article>
+
+        <article id="bt-program">
+          <h3 data-num="09">Program options</h3>
+          <p>You start a Bubble Tea app by creating a <code>tea.Program</code>. Options control terminal behaviour:</p>
+          <pre><code class="language-go">p := tea.NewProgram(
+              initialModel(),
+              tea.WithAltScreen(), // Full-screen mode (recommended)
+              tea.WithMouseCellMotion(), // Enable mouse events
+              )
+
+              if _, err := p.Run(); err != nil {
+              log.Fatal(err)
+              }</code></pre>
+          <table>
+            <tr>
+              <th>Option</th>
+              <th>Effect</th>
+            </tr>
+            <tr>
+              <td><code>WithAltScreen()</code></td>
+              <td>Uses the alternate screen buffer. App is full-screen and your shell's history is preserved on exit.
+              </td>
+            </tr>
+            <tr>
+              <td><code>WithMouseCellMotion()</code></td>
+              <td>Mouse motion + clicks → <code>tea.MouseMsg</code>.</td>
+            </tr>
+            <tr>
+              <td><code>WithMouseAllMotion()</code></td>
+              <td>Like above but reports motion even when no button is pressed.</td>
+            </tr>
+            <tr>
+              <td><code>WithoutSignalHandler()</code></td>
+              <td>Don't auto-handle SIGINT. You handle ctrl+c yourself.</td>
+            </tr>
+            <tr>
+              <td><code>WithInput(r io.Reader)</code></td>
+              <td>Read input from somewhere other than stdin (e.g. testing).</td>
+            </tr>
+            <tr>
+              <td><code>WithOutput(w io.Writer)</code></td>
+              <td>Write output somewhere other than stdout.</td>
+            </tr>
+          </table>
+        </article>
+
+        <article id="bt-composition">
+          <h3 data-num="10">Composition — child models</h3>
+          <p>Big apps are made of small models. The parent embeds children, and forwards messages to them.</p>
+          <pre><code class="language-go">type model struct {
+              input textinput.Model // a child model from Bubbles
+              viewport viewport.Model
+              focused string // "input" or "viewport"
+              }
+
+              func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+              var cmds []tea.Cmd
+              var cmd tea.Cmd
+
+              switch msg := msg.(type) {
+              case tea.KeyMsg:
+              if msg.String() == "tab" {
+              m.focused = toggle(m.focused)
+              return m, nil
+              }
+              }
+
+              // Forward to whichever child has focus.
+              if m.focused == "input" {
+              m.input, cmd = m.input.Update(msg)
+              cmds = append(cmds, cmd)
+              } else {
+              m.viewport, cmd = m.viewport.Update(msg)
+              cmds = append(cmds, cmd)
+              }
+
+              return m, tea.Batch(cmds...)
+              }
+
+              func (m model) View() string {
+              return lipgloss.JoinVertical(lipgloss.Left,
+              m.viewport.View(),
+              m.input.View(),
+              )
+              }</code></pre>
+          <p>Two rules for composition:</p>
+          <ul>
+            <li>The parent decides <strong>which child gets the message</strong>. Most parents forward keypresses only
+              to the focused child.</li>
+            <li>Window-size, ticks, and custom messages should usually be forwarded to <strong>all</strong> children —
+              they all need to know.</li>
+          </ul>
+        </article>
+
+        <article id="bt-async">
+          <h3 data-num="11">Sending messages from outside</h3>
+          <p>Sometimes you need a goroutine — a websocket reader, a queue consumer — to push messages into the program.
+            Use <code>p.Send()</code>:</p>
+          <pre><code class="language-go">p := tea.NewProgram(initialModel())
+
+              // In another goroutine (e.g. a websocket reader):
+              go func() {
+              for ev := range websocket.Events() {
+              p.Send(eventMsg{ev})
+              }
+              }()
+
+              if _, err := p.Run(); err != nil { log.Fatal(err) }</code></pre>
+          <p>This is how you pipe arbitrary external events (server-sent events, file watchers, IPC) into the model.</p>
+        </article>
+      </section>
+
+
+      <!-- ════════════════════════════════════════════════════════════════ -->
+      <!--   BUBBLES                                                         -->
+      <!-- ════════════════════════════════════════════════════════════════ -->
+      <section id="bubbles">
+        <div class="section-header">
+          <div class="section-eyebrow">Package two of three</div>
+          <h2><em>Bubbles</em> — pre-built widgets</h2>
+          <p class="section-tagline">Each Bubble is a complete Bubble Tea model: it has its own state, its own Update,
+            its own View. You embed it in your model and forward messages to it. Eleven essential widgets, used the same
+            way every time.</p>
+        </div>
+
+        <div class="callout tip">
+          <span class="callout-label">The pattern</span>
+          <p>Every Bubble follows the same three-step usage: <strong>(1)</strong> store it in your model,
+            <strong>(2)</strong> forward messages to it in <code>Update</code>, <strong>(3)</strong> call
+            <code>.View()</code> in your <code>View</code>. Once you see it once, you've seen them all.</p>
+        </div>
+
+        <article id="b-textinput">
+          <h3 data-num="01">textinput — single-line text field</h3>
+          <p>For chat composers, search bars, login fields. One line, with cursor and placeholder.</p>
+          <pre><code class="language-go">import "github.com/charmbracelet/bubbles/textinput"
+
+              type model struct { ti textinput.Model }
+
+              func newModel() model {
+              ti := textinput.New()
+              ti.Placeholder = "Type a message..."
+              ti.Focus()
+              ti.CharLimit = 280
+              ti.Width = 50
+              return model{ti}
+              }
+
+              func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+              var cmd tea.Cmd
+              m.ti, cmd = m.ti.Update(msg)
+              return m, cmd
+              }
+
+              func (m model) View() string { return m.ti.View() }</code></pre>
+          <p><strong>Useful methods:</strong> <code>.Value()</code> to read text, <code>.SetValue("")</code> to clear,
+            <code>.Focus()</code>/<code>.Blur()</code> for focus, <code>.Focused()</code> to check.</p>
+        </article>
+
+        <article id="b-textarea">
+          <h3 data-num="02">textarea — multi-line input</h3>
+          <p>Like <code>textinput</code>, but multiline. For commit messages, longer composing, code input.</p>
+          <pre><code class="language-go">import "github.com/charmbracelet/bubbles/textarea"
+
+              ta := textarea.New()
+              ta.Placeholder = "Write a message..."
+              ta.Focus()
+              ta.SetWidth(60)
+              ta.SetHeight(5)
+              ta.ShowLineNumbers = false</code></pre>
+          <p><strong>Useful methods:</strong> <code>.Value()</code>, <code>.SetValue(s)</code>,
+            <code>.LineCount()</code>, <code>.LineInfo()</code> for cursor position.</p>
+        </article>
+
+        <article id="b-viewport">
+          <h3 data-num="03">viewport — scrollable region</h3>
+          <p>This is the workhorse for chat windows, log readers, file viewers. Give it a chunk of pre-rendered text; it
+            handles scrolling.</p>
+          <pre><code class="language-go">import "github.com/charmbracelet/bubbles/viewport"
+
+              vp := viewport.New(80, 20) // width, height
+              vp.SetContent(longString)
+
+              // In Update — viewport handles its own keys (j/k, pgup/pgdn, etc.):
+              m.vp, cmd = m.vp.Update(msg)
+
+              // To re-set content (e.g. on new message):
+              m.vp.SetContent(renderMessages(m.messages))
+              m.vp.GotoBottom() // scroll to last line</code></pre>
+          <p><strong>Useful methods:</strong> <code>.GotoBottom()</code>, <code>.GotoTop()</code>,
+            <code>.LineUp(n)</code>, <code>.LineDown(n)</code>, <code>.SetContent(s)</code>, <code>.AtBottom()</code>
+            (useful to decide whether to auto-scroll on new content).</p>
+
+          <div class="callout use">
+            <span class="callout-label">Use viewport for</span>
+            <p>Anything that might overflow the visible area: chat history, log streams, markdown rendering, file diffs.
+            </p>
+          </div>
+        </article>
+
+        <article id="b-list">
+          <h3 data-num="04">list — selectable list with filter</h3>
+          <p>The most opinionated Bubble. Built-in keyboard navigation, filtering with <code>/</code>, status messages,
+            pagination. Good for inboxes, file pickers, any "pick one of many" UI.</p>
+          <pre><code class="language-go">import "github.com/charmbracelet/bubbles/list"
+
+              type item struct{ title, desc string }
+
+              func (i item) Title() string { return i.title }
+              func (i item) Description() string { return i.desc }
+              func (i item) FilterValue() string { return i.title }
+
+              items := []list.Item{
+              item{"Alice", "Hey, are you free?"},
+              item{"Bob", "Sent the design"},
+              }
+
+              l := list.New(items, list.NewDefaultDelegate(), 40, 20)
+              l.Title = "Inbox"</code></pre>
+          <p><strong>Useful methods:</strong> <code>.SelectedItem()</code>, <code>.Index()</code>,
+            <code>.SetItems(items)</code>, <code>.SetSize(w, h)</code>, <code>.SetFilteringEnabled(true)</code>.</p>
+          <p><strong>Customization:</strong> <code>list.NewDefaultDelegate()</code> renders title + description.
+            Implement <code>list.ItemDelegate</code> yourself for fully custom rows.</p>
+        </article>
+
+        <article id="b-table">
+          <h3 data-num="05">table — selectable rows + columns</h3>
+          <p>For dashboards, data views. Has navigation, focus styling, customizable styles.</p>
+          <pre><code class="language-go">import "github.com/charmbracelet/bubbles/table"
+
+              cols := []table.Column{
+              {Title: "Service", Width: 16},
+              {Title: "Status", Width: 10},
+              {Title: "Latency", Width: 10},
+              }
+
+              rows := []table.Row{
+              {"api", "up", "12ms"},
+              {"worker-1", "up", "8ms"},
+              {"db", "down", "—"},
+              }
+
+              t := table.New(
+              table.WithColumns(cols),
+              table.WithRows(rows),
+              table.WithFocused(true),
+              table.WithHeight(8),
+              )</code></pre>
+          <p><strong>Useful methods:</strong> <code>.SelectedRow()</code>, <code>.Cursor()</code>,
+            <code>.SetRows(rows)</code>, <code>.MoveUp(n)</code>, <code>.MoveDown(n)</code>.</p>
+        </article>
+
+        <article id="b-spinner">
+          <h3 data-num="06">spinner — loading indicator</h3>
+          <p>The animated <code>⠋ ⠙ ⠹ ⠸</code> spinner. Tiny, but it's how the user knows something's happening.</p>
+          <pre><code class="language-go">import "github.com/charmbracelet/bubbles/spinner"
+
+              s := spinner.New()
+              s.Spinner = spinner.Dot
+              s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF7849"))
+
+              // In Init — start ticking:
+              func (m model) Init() tea.Cmd { return m.spinner.Tick }
+
+              // In Update — keep it animated:
+              case spinner.TickMsg:
+              m.spinner, cmd = m.spinner.Update(msg)
+              return m, cmd
+
+              // In View:
+              return m.spinner.View() + " loading..."</code></pre>
+          <p><strong>Built-in styles:</strong> <code>spinner.Dot</code>, <code>.Line</code>, <code>.MiniDot</code>,
+            <code>.Jump</code>, <code>.Pulse</code>, <code>.Points</code>, <code>.Globe</code>, <code>.Moon</code>,
+            <code>.Monkey</code>, <code>.Meter</code>, <code>.Hamburger</code>.</p>
+          <div class="callout warn">
+            <span class="callout-label">Don't forget</span>
+            <p>If you don't return <code>m.spinner.Tick</code> from <code>Init</code> (or as a Cmd from Update), the
+              spinner will not animate. It needs ticks to advance frames.</p>
+          </div>
+        </article>
+
+        <article id="b-progress">
+          <h3 data-num="07">progress — progress bar</h3>
+          <p>For determinate progress (downloads, uploads, file processing).</p>
+          <pre><code class="language-go">import "github.com/charmbracelet/bubbles/progress"
+
+              p := progress.New(progress.WithDefaultGradient())
+              p.Width = 40
+
+              // Animate to 60%:
+              cmd := m.p.SetPercent(0.6)
+
+              // In Update — progress sends FrameMsg during animation:
+              case progress.FrameMsg:
+              pm, cmd := m.p.Update(msg)
+              m.p = pm.(progress.Model)
+              return m, cmd
+
+              // View:
+              return m.p.View()</code></pre>
+          <p><strong>Variants:</strong> <code>WithDefaultGradient()</code>, <code>WithSolidFill("#5fc5b0")</code>,
+            <code>WithGradient(from, to)</code>, <code>WithoutPercentage()</code>.</p>
+        </article>
+
+        <article id="b-paginator">
+          <h3 data-num="08">paginator — page indicator</h3>
+          <p>Renders <code>● ○ ○ ○</code> dots or <code>1/4</code> labels. Tracks pagination state for paginated lists.
+          </p>
+          <pre><code class="language-go">import "github.com/charmbracelet/bubbles/paginator"
+
+              p := paginator.New()
+              p.Type = paginator.Dots
+              p.PerPage = 10
+              p.SetTotalPages(len(items))
+
+              // Get the slice for the current page:
+              start, end := p.GetSliceBounds(len(items))
+              visible := items[start:end]
+
+              // Render:
+              return p.View()</code></pre>
+        </article>
+
+        <article id="b-key">
+          <h3 data-num="09">key — keybinding declarations</h3>
+          <p>Not a UI widget — but central. Defines named keybindings with help text. Pairs with the <code>help</code>
+            bubble.</p>
+          <pre><code class="language-go">import "github.com/charmbracelet/bubbles/key"
+
+              type keyMap struct {
+              Up key.Binding
+              Down key.Binding
+              Enter key.Binding
+              Quit key.Binding
+              }
+
+              var keys = keyMap{
+              Up: key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
+              Down: key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+              Enter: key.NewBinding(key.WithKeys("enter"), key.WithHelp("⏎", "select")),
+              Quit: key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+              }
+
+              // Match in Update:
+              case tea.KeyMsg:
+              switch {
+              case key.Matches(msg, keys.Up): m.cursor--
+              case key.Matches(msg, keys.Down): m.cursor++
+              case key.Matches(msg, keys.Quit): return m, tea.Quit
+              }</code></pre>
+          <div class="callout use">
+            <span class="callout-label">Why bother?</span>
+            <p>Two reasons: (1) you can disable bindings dynamically with <code>.SetEnabled(false)</code>, (2) the
+              <code>help</code> bubble auto-generates a help bar from these declarations.</p>
+          </div>
+        </article>
+
+        <article id="b-help">
+          <h3 data-num="10">help — auto-generated help bar</h3>
+          <p>The <code>ctrl+a approve · ctrl+r reject · ? help</code> footer at the bottom of polished TUIs. Reads your
+            <code>key.Binding</code>s and renders them.</p>
+          <pre><code class="language-go">import "github.com/charmbracelet/bubbles/help"
+
+              // Implement the help.KeyMap interface on your keymap:
+              func (k keyMap) ShortHelp() []key.Binding {
+              return []key.Binding{k.Up, k.Down, k.Enter, k.Quit}
+              }
+              func (k keyMap) FullHelp() [][]key.Binding {
+              return [][]key.Binding{
+              {k.Up, k.Down},
+              {k.Enter, k.Quit},
+              }
+              }
+
+              h := help.New()
+
+              // In View:
+              return mainContent + "\n" + h.View(keys)
+
+              // Toggle expanded help on "?":
+              case key.Matches(msg, keys.Help):
+              m.help.ShowAll = !m.help.ShowAll</code></pre>
+        </article>
+
+        <article id="b-filepicker">
+          <h3 data-num="11">filepicker — pick a file from disk</h3>
+          <p>A directory browser. Returns the selected file path.</p>
+          <pre><code class="language-go">import "github.com/charmbracelet/bubbles/filepicker"
+
+              fp := filepicker.New()
+              fp.AllowedTypes = []string{".md", ".txt"}
+              fp.CurrentDirectory, _ = os.UserHomeDir()
+
+              // In Update:
+              m.fp, cmd = m.fp.Update(msg)
+              if didSelect, path := m.fp.DidSelectFile(msg); didSelect {
+              m.selectedFile = path
+              }</code></pre>
+        </article>
+
+        <article id="b-stopwatch">
+          <h3 data-num="12">stopwatch &amp; timer</h3>
+          <p>Two small bubbles for time. <code>stopwatch</code> counts up, <code>timer</code> counts down.</p>
+          <pre><code class="language-go">import (
+              "github.com/charmbracelet/bubbles/stopwatch"
+              "github.com/charmbracelet/bubbles/timer"
+              )
+
+              sw := stopwatch.NewWithInterval(time.Millisecond * 100)
+              t := timer.NewWithInterval(5*time.Minute, time.Second)
+
+              // In Init:
+              return tea.Batch(m.sw.Init(), m.t.Init())
+
+              // In Update — forward StartStopMsg, TickMsg, etc:
+              m.sw, cmd = m.sw.Update(msg)
+              m.t, c2 := m.t.Update(msg)
+
+              // View:
+              return m.sw.View() + " · " + m.t.View()</code></pre>
+        </article>
+      </section>
+
+
+      <!-- ════════════════════════════════════════════════════════════════ -->
+      <!--   LIP GLOSS                                                       -->
+      <!-- ════════════════════════════════════════════════════════════════ -->
+      <section id="lipgloss">
+        <div class="section-header">
+          <div class="section-eyebrow">Package three of three</div>
+          <h2><em>Lip Gloss</em> — CSS for strings</h2>
+          <p class="section-tagline">Pure string-in, string-out. You build a <code>Style</code>, you call
+            <code>.Render(s)</code>, you get a styled string with ANSI escape codes baked in. That string can go
+            anywhere — printed, joined, written to a file. Lip Gloss never touches the terminal directly.</p>
+        </div>
+
+        <article id="lg-style">
+          <h3 data-num="01">Style — the core type</h3>
+          <p>Everything in Lip Gloss starts with <code>NewStyle()</code>. Methods return a new style — they chain.</p>
+          <pre><code class="language-go">import "github.com/charmbracelet/lipgloss"
+
+              style := lipgloss.NewStyle().
+              Foreground(lipgloss.Color("#FF7849")).
+              Background(lipgloss.Color("#11151D")).
+              Bold(true).
+              Padding(1, 2).
+              Border(lipgloss.RoundedBorder())
+
+              fmt.Println(style.Render("Hello"))</code></pre>
+          <p>Styles are <strong>immutable</strong>. Each method returns a fresh style. You can store partial styles and
+            reuse them.</p>
+          <pre><code class="language-go">var (
+              base = lipgloss.NewStyle().Padding(0, 1)
+              primary = base.Foreground(lipgloss.Color("#FF7849"))
+              danger = base.Foreground(lipgloss.Color("#ED6A5E")).Bold(true)
+              )</code></pre>
+        </article>
+
+        <article id="lg-colors">
+          <h3 data-num="02">Colors</h3>
+          <p>Three color types, picked for different scenarios.</p>
+          <table>
+            <tr>
+              <th>Type</th>
+              <th>Use when</th>
+            </tr>
+            <tr>
+              <td><code>Color("#FF7849")</code></td>
+              <td>Always render this exact color. Hex, ANSI 256, or ANSI 16.</td>
+            </tr>
+            <tr>
+              <td><code>AdaptiveColor{Light, Dark}</code></td>
+              <td>Pick based on terminal background — light mode users get one color, dark mode gets another.</td>
+            </tr>
+            <tr>
+              <td><code>CompleteColor{TrueColor, ANSI256, ANSI}</code></td>
+              <td>Specify the same color in three formats. Lip Gloss picks the best for the terminal's capabilities.
+              </td>
+            </tr>
+          </table>
+          <pre><code class="language-go">// Static
+              lipgloss.Color("#FF7849") // hex
+              lipgloss.Color("205") // ANSI 256
+              lipgloss.Color("9") // ANSI 16 (red)
+
+              // Adapts to light/dark terminals
+              lipgloss.AdaptiveColor{
+              Light: "#1F2937",
+              Dark: "#E5E7EB",
+              }
+
+              // Best of all worlds
+              lipgloss.CompleteColor{
+              TrueColor: "#FF7849",
+              ANSI256: "208",
+              ANSI: "3",
+              }</code></pre>
+          <p>Apply with <code>.Foreground(c)</code> and <code>.Background(c)</code>.</p>
+        </article>
+
+        <article id="lg-text">
+          <h3 data-num="03">Text formatting</h3>
+          <pre><code class="language-go">lipgloss.NewStyle().
+              Bold(true).
+              Italic(true).
+              Underline(true).
+              Strikethrough(true).
+              Reverse(true). // swap fg/bg
+              Blink(true). // rarely supported
+              Faint(true). // dim
+              Render("formatted")</code></pre>
+          <p>All booleans. All chainable. Apply only what you need.</p>
+        </article>
+
+        <article id="lg-spacing">
+          <h3 data-num="04">Padding &amp; margin</h3>
+          <p>CSS-style. Padding is <em>inside</em> the box, margin is <em>outside</em>.</p>
+          <pre><code class="language-go">// All four sides
+              .Padding(2)
+
+              // Vertical, horizontal
+              .Padding(1, 2) // 1 top/bottom, 2 left/right
+
+              // Top, right, bottom, left (CSS shorthand)
+              .Padding(1, 2, 3, 4)
+
+              // Individual
+              .PaddingTop(1).PaddingLeft(2)
+
+              // Margin works the same
+              .Margin(1, 2)
+              .MarginTop(1)</code></pre>
+        </article>
+
+        <article id="lg-borders">
+          <h3 data-num="05">Borders</h3>
+          <p>Built-in border styles, or define your own characters.</p>
+          <pre><code class="language-go">.Border(lipgloss.NormalBorder())
+              .Border(lipgloss.RoundedBorder()) // ╭─╮ ╰─╯
+              .Border(lipgloss.ThickBorder()) // ┏━┓ ┗━┛
+              .Border(lipgloss.DoubleBorder()) // ╔═╗ ╚═╝
+              .Border(lipgloss.HiddenBorder()) // takes up space, invisible
+
+              // Only some sides:
+              .Border(lipgloss.NormalBorder(), true, false, true, false)
+              // top right bottom left
+
+              // Border color (independent of fg):
+              .BorderForeground(lipgloss.Color("#FF7849"))
+
+              // Custom:
+              b := lipgloss.Border{
+              Top: "─", Bottom: "─", Left: "│", Right: "│",
+              TopLeft: "╭", TopRight: "╮", BottomLeft: "╰", BottomRight: "╯",
+              }
+              .Border(b)</code></pre>
+        </article>
+
+        <article id="lg-dimensions">
+          <h3 data-num="06">Width &amp; height</h3>
+          <p>Force a string to a specific size. Pads or wraps as needed.</p>
+          <pre><code class="language-go">.Width(40) // exactly 40 cells wide
+              .Height(10) // exactly 10 lines tall
+              .MaxWidth(80) // wrap if longer
+              .MaxHeight(20) // truncate if taller</code></pre>
+          <p>Combined with padding/borders, this is how you build fixed-size panes:</p>
+          <pre><code class="language-go">pane := lipgloss.NewStyle().
+              Width(40).
+              Height(20).
+              Border(lipgloss.RoundedBorder()).
+              Padding(1, 2)</code></pre>
+          <div class="callout warn">
+            <span class="callout-label">Width gotcha</span>
+            <p><code>.Width()</code> is the inner width — it does not include border or margin. Total cells used = Width
+              + horizontal padding + 2 (border) + horizontal margin.</p>
+          </div>
+        </article>
+
+        <article id="lg-alignment">
+          <h3 data-num="07">Alignment</h3>
+          <pre><code class="language-go">.Align(lipgloss.Center) // both axes
+              .AlignHorizontal(lipgloss.Right)
+              .AlignVertical(lipgloss.Bottom)
+
+              // Constants:
+              // lipgloss.Left, .Center, .Right
+              // lipgloss.Top, .Center, .Bottom</code></pre>
+          <p>Alignment requires a <code>.Width()</code> (for horizontal) or <code>.Height()</code> (for vertical) to
+            have something to align inside.</p>
+        </article>
+
+        <article id="lg-joining">
+          <h3 data-num="08">Joining strings — the layout primitive</h3>
+          <p>This is how you build multi-pane layouts. Two functions, used everywhere.</p>
+          <pre><code class="language-go">// Side by side. Second arg = vertical alignment of items.
+              lipgloss.JoinHorizontal(lipgloss.Top, sidebar, content, panel)
+
+              // Stacked. Second arg = horizontal alignment.
+              lipgloss.JoinVertical(lipgloss.Left, header, body, footer)</code></pre>
+
+          <h4>Example: a three-pane chat app</h4>
+          <pre><code class="language-go">func (m model) View() string {
+              sidebar := paneStyle.Width(24).Height(m.height-2).Render(m.sidebar.View())
+              chat := paneStyle.Width(m.width-24-30).Height(m.height-2).Render(m.chat.View())
+              info := paneStyle.Width(30).Height(m.height-2).Render(m.info.View())
+
+              body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, chat, info)
+
+              return lipgloss.JoinVertical(lipgloss.Left, body, m.statusbar.View())
+              }</code></pre>
+        </article>
+
+        <article id="lg-place">
+          <h3 data-num="09">Place — center anything</h3>
+          <p>Drops a string at a position inside a larger box. Perfect for splash screens and modals.</p>
+          <pre><code class="language-go">// Center horizontally and vertically in a 80×24 area:
+              lipgloss.Place(80, 24,
+              lipgloss.Center, lipgloss.Center,
+              "✦ Welcome to switch ✦",
+              )
+
+              // Or one axis at a time:
+              lipgloss.PlaceHorizontal(80, lipgloss.Right, "→")
+              lipgloss.PlaceVertical(24, lipgloss.Bottom, "status: ok")</code></pre>
+        </article>
+
+        <article id="lg-table">
+          <h3 data-num="10">Tables</h3>
+          <p>Lip Gloss includes a <code>table</code> subpackage for static tables (different from the interactive
+            Bubbles <code>table</code>).</p>
+          <pre><code class="language-go">import "github.com/charmbracelet/lipgloss/table"
+
+              t := table.New().
+              Border(lipgloss.RoundedBorder()).
+              BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("#5FC5B0"))).
+              Headers("SERVICE", "STATUS", "LATENCY").
+              Rows(
+              []string{"api", "up", "12ms"},
+              []string{"db", "down", "—"},
+              ).
+              StyleFunc(func(row, col int) lipgloss.Style {
+              if row == 0 { return headerStyle }
+              if col == 1 { return statusStyle }
+              return cellStyle
+              })
+
+              fmt.Println(t)</code></pre>
+        </article>
+
+        <article id="lg-tree">
+          <h3 data-num="11">Trees</h3>
+          <p>The <code>tree</code> subpackage renders nested data as an indented tree. Great for file trees, DOM-like
+            structures, log hierarchies.</p>
+          <pre><code class="language-go">import "github.com/charmbracelet/lipgloss/tree"
+
+              t := tree.Root("switch").
+              Child(
+              tree.New().Root("tui").
+              Child("model.go", "update.go", "view.go").
+              Child(
+              tree.New().Root("conversation").
+              Child("model.go", "view.go"),
+              ),
+              "main.go",
+              "script.sh",
+              )
+
+              fmt.Println(t)</code></pre>
+          <div class="term">
+            <div class="term-bar">
+              <span class="term-dot r"></span><span class="term-dot y"></span><span class="term-dot g"></span>
+              <span class="term-title">tree output</span>
+            </div>
+            <div class="term-body"><span class="hl">switch</span>
+              ├── tui
+              │ ├── model.go
+              │ ├── update.go
+              │ ├── view.go
+              │ └── conversation
+              │ ├── model.go
+              │ └── view.go
+              ├── main.go
+              └── script.sh</div>
+          </div>
+        </article>
+      </section>
+
+
+      <!-- ════════════════════════════════════════════════════════════════ -->
+      <!--   RECIPES                                                         -->
+      <!-- ════════════════════════════════════════════════════════════════ -->
+      <section id="recipes">
+        <div class="section-header">
+          <div class="section-eyebrow">Putting it together</div>
+          <h2>Three <em>real recipes</em> from a chat TUI</h2>
+          <p class="section-tagline">All three packages working together, the way you'll actually use them.</p>
+        </div>
+
+        <article id="recipe-chat">
+          <h3 data-num="01">A chat-window layout</h3>
+          <p>Conversation viewport on top, input at the bottom, status bar at the very bottom. Resize-aware. The classic
+            switch / Claude / chat-app shape.</p>
+          <pre><code class="language-go">type model struct {
+              vp viewport.Model
+              input textinput.Model
+              width int
+              height int
+              }
+
+              func newModel() model {
+              ti := textinput.New()
+              ti.Placeholder = "Type a message..."
+              ti.Focus()
+
+              vp := viewport.New(0, 0) // sized later by WindowSizeMsg
+              return model{vp: vp, input: ti}
+              }
+
+              var (
+              paneStyle = lipgloss.NewStyle().
+              Border(lipgloss.RoundedBorder()).
+              BorderForeground(lipgloss.Color("#2A3140")).
+              Padding(0, 1)
+              statusStyle = lipgloss.NewStyle().
+              Foreground(lipgloss.Color("#8B8F9A")).
+              Padding(0, 1)
+              )
+
+              func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+              switch msg := msg.(type) {
+              case tea.WindowSizeMsg:
+              m.width = msg.Width
+              m.height = msg.Height
+              m.vp.Width = msg.Width - 4 // account for border + padding
+              m.vp.Height = msg.Height - 6 // account for input + status
+              m.input.Width = msg.Width - 6
+              case tea.KeyMsg:
+              if msg.String() == "ctrl+c" { return m, tea.Quit }
+              }
+
+              var c1, c2 tea.Cmd
+              m.vp, c1 = m.vp.Update(msg)
+              m.input, c2 = m.input.Update(msg)
+              return m, tea.Batch(c1, c2)
+              }
+
+              func (m model) View() string {
+              return lipgloss.JoinVertical(lipgloss.Left,
+              paneStyle.Render(m.vp.View()),
+              paneStyle.Render(m.input.View()),
+              statusStyle.Render("ctrl+c quit"),
+              )
+              }</code></pre>
+        </article>
+
+        <article id="recipe-loading">
+          <h3 data-num="02">A loading state during async work</h3>
+          <p>Spinner while loading, content when done. The pattern for any async UI.</p>
+          <pre><code class="language-go">type chatLoadedMsg struct{ chats []Chat }
+
+              type model struct {
+              spin spinner.Model
+              loading bool
+              chats []Chat
+              }
+
+              func loadChats() tea.Cmd {
+              return func() tea.Msg {
+              chats := api.FetchChats() // expensive
+              return chatLoadedMsg{chats}
+              }
+              }
+
+              func (m model) Init() tea.Cmd {
+              return tea.Batch(m.spin.Tick, loadChats())
+              }
+
+              func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+              switch msg := msg.(type) {
+              case chatLoadedMsg:
+              m.loading = false
+              m.chats = msg.chats
+              return m, nil
+              case spinner.TickMsg:
+              var cmd tea.Cmd
+              m.spin, cmd = m.spin.Update(msg)
+              return m, cmd
+              }
+              return m, nil
+              }
+
+              func (m model) View() string {
+              if m.loading {
+              return m.spin.View() + " loading chats..."
+              }
+              return renderChats(m.chats)
+              }</code></pre>
+        </article>
+
+        <article id="recipe-tabs">
+          <h3 data-num="03">Multi-pane focus with Tab</h3>
+          <p>Tab cycles focus. Whichever pane is focused gets a coral border and the keystrokes.</p>
+          <pre><code class="language-go">type pane int
+              const ( paneList pane = iota; paneInput )
+
+              type model struct {
+              list list.Model
+              input textinput.Model
+              focus pane
+              }
+
+              var (
+              blur = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
+              BorderForeground(lipgloss.Color("#2A3140"))
+              focus = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
+              BorderForeground(lipgloss.Color("#FF7849"))
+              )
+
+              func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+              if k, ok := msg.(tea.KeyMsg); ok && k.String() == "tab" {
+              m.focus = (m.focus + 1) % 2
+              return m, nil
+              }
+
+              var cmd tea.Cmd
+              switch m.focus {
+              case paneList: m.list, cmd = m.list.Update(msg)
+              case paneInput: m.input, cmd = m.input.Update(msg)
+              }
+              return m, cmd
+              }
+
+              func styleFor(p, current pane) lipgloss.Style {
+              if p == current { return focus }
+              return blur
+              }
+
+              func (m model) View() string {
+              return lipgloss.JoinHorizontal(lipgloss.Top,
+              styleFor(paneList, m.focus).Render(m.list.View()),
+              styleFor(paneInput, m.focus).Render(m.input.View()),
+              )
+              }</code></pre>
+        </article>
+      </section>
+
+      <footer>
+        Built for <span class="accent">switch</span> &middot; charm/docs is a personal field guide<br>
+        Bubble Tea, Bubbles, Lip Gloss are MIT-licensed projects by <span class="accent">Charm</span>
+      </footer>
+
+    </main>
+  </div>
+
+  <script>
+    // ─── Syntax highlighting ───
+    document.querySelectorAll('pre code').forEach(block => {
+      if (block.classList.length === 0) {
+        block.classList.add('language-go');
+      }
+      hljs.highlightElement(block);
+    });
+
+    // ─── Active section in sidebar ───
+    const navLinks = document.querySelectorAll('.nav-link');
+    const sections = [...document.querySelectorAll('article[id], section[id]')];
+    const tabs = document.querySelectorAll('.pkg-tab');
+
+    function setActive() {
+      const scroll = window.scrollY + 100;
+      let current = sections[0];
+      for (const s of sections) {
+        if (s.offsetTop <= scroll) current = s;
+      }
+      if (!current) return;
+
+      navLinks.forEach(l => {
+        l.classList.toggle('active', l.getAttribute('href') === '#' + current.id);
+      });
+
+      // Top-level tab
+      let tabId = null;
+      if (current.closest('#bubbletea')) tabId = 'bubbletea';
+      else if (current.closest('#bubbles')) tabId = 'bubbles';
+      else if (current.closest('#lipgloss')) tabId = 'lipgloss';
+
+      tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === tabId));
+    }
+
+    setActive();
+    window.addEventListener('scroll', setActive, {passive: true});
+  </script>
+
+</body>
+
+</html>
