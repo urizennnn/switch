@@ -141,10 +141,10 @@ This is the product's actual value. The ACP boilerplate is now a dependency, not
 
 Adapters are external executables or npm packages, so installation is a security
 boundary. V1 does not install anything automatically and does not run installers
-inside a run. `switch probe --list` only reports what is present and prints
+inside a run. `switch __control probe --list` only reports what is present and prints
 remediation hints.
 
-A later `switch doctor` / first-run flow will offer an explicit installation UI:
+A later `/doctor` / first-run flow will offer an explicit installation UI:
 
 - show the exact command, package, pinned version, source URL, and install scope
 - require one confirmation per package, with a visible "do not install" default
@@ -457,7 +457,7 @@ The earlier Phase 0 assumed we had to build an ACP client. Revised:
 2. Build `internal/driver/acp` around `ClientSideConnection`.
 3. Spawn `opencode acp`, `codex-acp`, and `claude-agent-acp` as subprocesses.
 4. Implement a minimal `acp.Client` bridge: stream updates, capture usage, route one permission request.
-5. Add `switch probe --agent <name>` to print the capability matrix and run one prompt.
+5. Add `switch __control probe --agent <name>` to print the capability matrix and run one prompt.
 6. Verify session resume: kill the process, respawn, `LoadSession` or `ResumeSession`, continue.
 
 **Acceptance:** one prompt streams through each of the three vendors, a tool permission request reaches the TUI, and a session survives a process restart.
@@ -471,7 +471,7 @@ The earlier Phase 0 assumed we had to build an ACP client. Revised:
 | Risk | Mitigation |
 |---|---|
 | ACP SDK is v0.x and may change | Pin exact version; wrap it; conformance tests; budget a small upgrade each cycle |
-| Adapter capability differences | Probe at startup; feature flags; per-adapter fallbacks; `switch doctor` |
+| Adapter capability differences | Probe at startup; feature flags; per-adapter fallbacks; `/doctor` |
 | SDK notification handler blocks and stalls an agent | Non-blocking `SessionUpdate`; buffered queue; test with a slow consumer |
 | Session resume behaves differently per vendor | Store session IDs; prefer `ResumeSession`; handle `LoadSession` replay explicitly |
 | Lead ignores the delegation protocol | Strong role contract, structured tools, validation, manual TUI fallback |
@@ -533,14 +533,14 @@ Phase 0 exit criteria are met for OpenCode, Codex, and Claude. The next mileston
 
 Implemented:
 
-- Global/project TOML configuration with `switch init` and automatic project initialization on first `switch`/`switch chat` run
+- Global/project TOML configuration with `/init` and automatic project initialization on first `switch` run
 - Global, project, and project-local rule loading with prompt injection
 - SQLite-backed chat session and message state
 - Reusable ACP `Session` API with event and permission channels
-- Resumable `switch chat` REPL
+- Resumable TUI chat, plus an internal `__control chat` REPL
 - Bubble Tea TUI wired to the chat engine: streaming messages, history,
   permission choices, session resume, and `/rules`
-- `switch doctor` diagnostics
+- `/doctor` diagnostics
 
 Not yet implemented (Phase 2):
 
@@ -558,7 +558,7 @@ Implemented:
 - Plan schema with dependency/cycle validation (`internal/plan`)
 - Durable runs, run agents, and tasks in SQLite
 - Git worktree manager with per-run integration and agent worktrees
-- `switch plan` (headless) and TUI `/plan`:
+- TUI `/plan` and the internal `__control plan` (headless):
   - ask the configured lead for a JSON plan, or import `--file`
   - create the run integration branch and a worktree per configured agent
   - persist the plan as queued tasks with mapped dependencies
@@ -567,7 +567,7 @@ Implemented:
   `/new`, `/help`, `/quit`
 
 Configured fleet defaults to one lead plus two builders. Projects created by
-`switch init` get three OpenCode agents; edit `.switch/config.toml` to mix
+first run get three OpenCode agents; edit `.switch/config.toml` to mix
 drivers/models.
 
 Not yet implemented:

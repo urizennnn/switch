@@ -16,8 +16,8 @@ The design is vendor-agnostic and built on the [Agent Client Protocol](https://a
 | Capability report | Working |
 | TUI chat shell | Wired to the engine with streaming, history, permissions, and resume |
 | TUI slash commands | `/plan`, `/doctor`, `/init`, `/rules`, `/session`, `/new` |
-| Config, rules, SQLite state | Working (`switch init`, `switch chat`, `switch doctor`) |
-| Plan generation + run worktrees | Working (`switch plan`, lead-generated or `--file`) |
+| Config, rules, SQLite state | Working (TUI `/init`, `/doctor`; auto-init on first run) |
+| Plan generation + run worktrees | Working (TUI `/plan`, lead-generated or `--file`) |
 | Task execution, scheduler, review/merge | In progress (Phase 2; planning foundation done) |
 
 See [`docs/architecture.md`](docs/architecture.md) for the full architecture, language choice, phases, and risks.
@@ -61,23 +61,22 @@ Type `/` to open the command palette. It filters as you type, shows
 descriptions, and supports up/down, tab completion, and enter. Anything that
 does not start with `/` is sent to the agent.
 
-### Headless commands
+### Internal control
 
-The same engine is available without the TUI for automation:
+There are no user-facing CLI subcommands. The TUI is the product surface.
+The unadvertised `__control` entry point remains for agents, automation, and
+tests until the Unix-socket control plane lands:
 
 ```bash
-./switch chat
-./switch plan "Add a health endpoint"
-./switch plan --file plan.json
-./switch doctor
-./switch probe --list
-./switch probe --agent opencode --no-prompt
+./switch __control doctor
+./switch __control plan --file plan.json
+./switch __control probe --list
 ```
 
 Resume a probe session by passing the session ID printed by a previous run:
 
 ```bash
-./switch probe --agent opencode --session <session-id> \
+./switch __control probe --agent opencode --session <session-id> \
   --prompt "What did you just say? One short sentence."
 ```
 
@@ -146,14 +145,14 @@ The probe implementation lives in:
 - `internal/probe/probe.go` — CLI flags
 - `internal/plan/` — plan schema and DAG validation
 - `internal/worktree/` — git worktree creation and cleanup
-- `internal/plancli/` — `switch plan` lead prompt and run creation
+- `internal/plancli/` — internal `plan` command; the TUI calls `internal/planning` directly
 
-The `tui/` package is now wired to the chat engine. `switch` opens the TUI; `switch chat` provides the same engine as a line-based REPL.
+The `tui/` package is wired to the chat engine. `switch` opens the TUI; the hidden `__control` commands use the same engine for automation.
 
 ## Known limitations
 
 - The TUI supports one resumable agent chat.
-- `switch plan` creates a run, agent worktrees, and persisted tasks; task execution and review are the next Phase 2 step.
+- `/plan` creates a run, agent worktrees, and persisted tasks; task execution and review are the next Phase 2 step.
 - Task execution currently stops after planning; no worker has been dispatched yet.
 - OpenClaw is untested because it is not installed on this machine.
 - OpenCode's default model may hit provider privacy settings; use `--model` to choose a permitted model.

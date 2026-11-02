@@ -23,16 +23,8 @@ import (
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "chat":
-			os.Exit(chatcli.Run(os.Args[2:]))
-		case "plan":
-			os.Exit(plancli.Run(os.Args[2:]))
-		case "probe":
-			os.Exit(probe.Run(os.Args[2:]))
-		case "doctor":
-			os.Exit(doctor.Run(os.Args[2:]))
-		case "init":
-			os.Exit(initcmd.Run(os.Args[2:]))
+		case "__control":
+			os.Exit(control(os.Args[2:]))
 		case "version", "-v", "--version":
 			fmt.Println(buildversion.Version)
 			return
@@ -40,14 +32,37 @@ func main() {
 			usage()
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "switch: unknown command %q\n\n", os.Args[1])
-			usage()
+			fmt.Fprintln(os.Stderr, "switch is a TUI. Run `switch`, then type /help.")
 			os.Exit(2)
 		}
 	}
 
 	if err := runTUI(); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// control is the internal, unadvertised entry point used by agents,
+// automation, and tests until the Unix-socket control plane lands.
+func control(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "internal control: chat, plan, probe, doctor, init")
+		return 2
+	}
+	switch args[0] {
+	case "chat":
+		return chatcli.Run(args[1:])
+	case "plan":
+		return plancli.Run(args[1:])
+	case "probe":
+		return probe.Run(args[1:])
+	case "doctor":
+		return doctor.Run(args[1:])
+	case "init":
+		return initcmd.Run(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "internal control: unknown command %q\n", args[0])
+		return 2
 	}
 }
 
@@ -106,10 +121,11 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `switch — multi-agent orchestration for coding agents
 
 Usage:
-  switch                  start the TUI (primary interface)
+  switch                  start the TUI
   switch help             show this help
+  switch version          print the version
 
-TUI commands:
+Inside the TUI, type / to open the command palette:
   /plan <goal>            ask the lead to plan and create a run
   /plan --file <path>     import a plan JSON file
   /doctor                 check config, rules, adapters, and state
@@ -118,13 +134,5 @@ TUI commands:
   /session                show the current agent session
   /new                    start a new agent session
   /quit                   exit
-
-Headless commands (automation):
-  switch chat [flags]     chat without the TUI
-  switch plan [goal]      plan and create worktrees without the TUI
-  switch doctor [dir]     raw diagnostics
-  switch init [dir]       create project config and rules
-  switch probe [flags]    connect to one ACP agent and stream a prompt
-  switch version          print the version
 `)
 }
