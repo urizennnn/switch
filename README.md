@@ -1,6 +1,6 @@
 # Switch
 
-> **⚠️ Early development — Phase 0 complete.**
+> **⚠️ Early development — Phase 1 chat shell complete.**
 
 Switch is a terminal orchestrator for a fleet of existing coding agents. It does not call models itself. It launches vendor CLIs as subprocesses, gives each one a role and an isolated workspace, and lets exactly one agent — the lead — plan, delegate, review, and talk to you. You converse only with the lead.
 
@@ -14,8 +14,9 @@ The design is vendor-agnostic and built on the [Agent Client Protocol](https://a
 | Session create / prompt / resume | Working |
 | Permission allow / deny bridge | Working (verified with Claude; interactive ask path implemented) |
 | Capability report | Working |
-| TUI orchestration shell | Existing Bubble Tea scaffold; not yet wired to the engine |
-| Task engine, worktrees, rules, lead/worker flow | Planned (Phase 1+) |
+| TUI chat shell | Wired to the engine with streaming, history, permissions, and resume |
+| Config, rules, SQLite state | Working (`switch init`, `switch chat`, `switch doctor`) |
+| Task engine, worktrees, lead/worker flow | Planned (Phase 2+) |
 
 See [`docs/architecture.md`](docs/architecture.md) for the full architecture, language choice, phases, and risks.
 
@@ -35,6 +36,18 @@ The Codex and Claude adapters are Node processes. `npx` is used as a fallback; i
 ```bash
 # Build
 go build -o switch .
+
+# Create project config and starter rules
+./switch init
+
+# Start the TUI (one resumable agent chat)
+./switch
+
+# Or use the line-based REPL
+./switch chat
+
+# Check config, rules, state, and adapters
+./switch doctor
 
 # See which adapters are available locally
 ./switch probe --list
@@ -91,7 +104,7 @@ Resume a session by passing the session ID printed by a previous run:
 {"type":"turn","stopReason":"end_turn","usage":{...}}
 ```
 
-This is the event shape the TUI will consume.
+This is the event shape the TUI consumes.
 
 ## Design in one paragraph
 
@@ -100,7 +113,7 @@ Switch runs a modular Go monolith. The engine owns runs, tasks, agents, rules, w
 ## Roadmap
 
 1. **Phase 0 — ACP spine** *(done)*: probe OpenCode, Codex, Claude; capability matrix; permissions; resume.
-2. **Phase 1 — Engine + chat shell**: config, SQLite state, session manager, TUI chat, `/rules`, doctor.
+2. **Phase 1 — Engine + chat shell** *(done)*: config, SQLite state, session manager, TUI chat, `/rules`, doctor.
 3. **Phase 2 — Lead + workers**: plan schema, control socket/CLI/MCP bridge, scheduler, worktrees, fleet view.
 4. **Phase 3 — Review + integration**: verification, diff review, merge queue, retries, budgets.
 5. **Phase 4 — Rules + context**: global/project/role rules, effective-rules view, product context docs.
@@ -122,11 +135,11 @@ The probe implementation lives in:
 - `internal/driver/acpdriver/probe.go` — lifecycle, capabilities, prompt, resume
 - `internal/probe/probe.go` — CLI flags
 
-The existing `tui/` package is the original Bubble Tea shell. It is intentionally untouched until Phase 1, when it will be wired to the engine.
+The `tui/` package is now wired to the chat engine. `switch` opens the TUI; `switch chat` provides the same engine as a line-based REPL.
 
 ## Known limitations
 
-- The TUI does not orchestrate agents yet; only the probe path is functional.
+- The TUI supports one resumable agent chat. Lead/worker orchestration, task state, and worktrees are Phase 2 work.
 - OpenClaw is untested because it is not installed on this machine.
 - OpenCode's default model may hit provider privacy settings; use `--model` to choose a permitted model.
 - Claude adapter hooks/plugins can add stderr noise; use `--agent-logs` only when debugging.

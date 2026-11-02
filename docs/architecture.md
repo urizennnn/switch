@@ -245,9 +245,10 @@ internal/config/                TOML load/merge/validation
 internal/doctor/
 ```
 
-The driver and probe packages exist now. The rest are created in Phase 1 and
-later; the existing top-level `tui/` package remains the current Bubble Tea
-scaffold until it is moved under `internal/tui/`.
+The driver, probe, config, rules, store, chat, chat CLI, doctor, and init
+packages exist now. The top-level `tui/` package is wired to the chat engine.
+The task orchestrator, agent pool, worktree manager, and control plane remain
+Phase 2 work.
 
 ---
 
@@ -525,3 +526,25 @@ Notes:
 - Session IDs printed by the probe can be passed back with `--session` for resume.
 
 Phase 0 exit criteria are met for OpenCode, Codex, and Claude. The next milestone is the engine/TUI shell (Phase 1), not more ACP plumbing.
+
+---
+
+## 16. Phase 1 status (2026-11-02)
+
+Implemented:
+
+- Global/project TOML configuration with `switch init`
+- Global, project, and project-local rule loading with prompt injection
+- SQLite-backed chat session and message state
+- Reusable ACP `Session` API with event and permission channels
+- Resumable `switch chat` REPL
+- Bubble Tea TUI wired to the chat engine: streaming messages, history,
+  permission choices, session resume, and `/rules`
+- `switch doctor` diagnostics
+
+Not yet implemented (Phase 2):
+
+- Task plans, scheduler, and lead/worker delegation
+- Git worktrees, verification runner, review, and merge queue
+- Control socket, agent-facing CLI, and MCP bridge
+- Role-scoped rule compilation
