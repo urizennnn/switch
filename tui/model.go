@@ -9,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/urizennnn/switch/internal/chat"
+	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/rules"
 	"github.com/urizennnn/switch/internal/store"
@@ -21,6 +22,7 @@ type Options struct {
 	Store   *store.Store
 	Status  chat.Status
 	Created []string
+	Fleet   []config.Agent
 }
 
 type model struct {
@@ -30,6 +32,7 @@ type model struct {
 	store   *store.Store
 	status  chat.Status
 	created []string
+	fleet   []config.Agent
 
 	input    textinput.Model
 	viewport viewport.Model
@@ -45,7 +48,12 @@ type model struct {
 	permission    *acpdriver.PermissionRequest
 	err           error
 
-	splash       bool
+	home         bool
+	modalTitle   string
+	modal        string
+	run          *store.Run
+	tasks        []store.Task
+	runAgents    []store.RunAgent
 	palette      []slashCommand
 	paletteIndex int
 	paletteOpen  bool
@@ -72,16 +80,18 @@ func New(opts Options) model {
 		store:    opts.Store,
 		status:   opts.Status,
 		created:  opts.Created,
+		fleet:    opts.Fleet,
 		input:    input,
 		viewport: viewportModel,
 		width:    80,
 		height:   24,
 		state:    "ready",
-		splash:   true,
+		home:     true,
 	}
 
 	m.transcript = m.initialTranscript()
 	m.refreshViewport()
+	m.refreshDashboard()
 	m.layout()
 	return m
 }
@@ -206,4 +216,44 @@ func shortID(id string) string {
 		return id
 	}
 	return id[:12]
+}
+
+func (m *model) refreshDashboard() {
+	if m.store == nil || m.chat == nil {
+		return
+	}
+	run, ok, err := m.store.LatestRun(m.ctx, m.chat.Project)
+	if err != nil || !ok {
+		m.run = nil
+		m.tasks = nil
+		m.runAgents = nil
+		return
+	}
+	m.run = &run
+	m.tasks, _ = m.store.TasksForRun(m.ctx, run.ID)
+	m.runAgents, _ = m.store.RunAgents(m.ctx, run.ID)
+}
+
+func (m model) dashboardFleet() []config.Agent {
+	if len(m.fleet) > 0 {
+		return m.fleet
+	}
+	if m.chat == nil {
+		return nil
+	}
+	return []config.Agent{{Name: "lead", Role: "lead", Driver: m.chat.Agent, Model: m.chat.Model}}
+}
+
+func (m model) taskCounts() (queued, running, done int) {
+	for _, task := range m.tasks {
+		switch task.Status {
+		case "queued":
+			queued++
+		case "running", "assigned", "verifying", "review":
+			running++
+		case "done", "merged", "approved":
+			done++
+		}
+	}
+	return queued, running, done
 }

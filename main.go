@@ -112,6 +112,7 @@ func runTUI() error {
 		Store:   state,
 		Status:  status,
 		Created: created,
+		Fleet:   cfg.Fleet(),
 	}))
 	_, err = program.Run()
 	return err

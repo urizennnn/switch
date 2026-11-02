@@ -273,6 +273,24 @@ func (s *Store) GetRun(ctx context.Context, id string) (Run, bool, error) {
 	return run, true, nil
 }
 
+func (s *Store) LatestRun(ctx context.Context, project string) (Run, bool, error) {
+	var run Run
+	var created string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, project, goal, base_ref, integration_branch, status, created_at
+		FROM runs WHERE project = ?
+		ORDER BY created_at DESC, rowid DESC LIMIT 1`, project).
+		Scan(&run.ID, &run.Project, &run.Goal, &run.BaseRef, &run.IntegrationBranch, &run.Status, &created)
+	if err == sql.ErrNoRows {
+		return Run{}, false, nil
+	}
+	if err != nil {
+		return Run{}, false, err
+	}
+	run.CreatedAt, _ = time.Parse(time.RFC3339, created)
+	return run, true, nil
+}
+
 func (s *Store) SaveRunAgent(ctx context.Context, agent RunAgent) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO run_agents(id, run_id, name, role, driver, model, worktree, branch, session_id, status, created_at)

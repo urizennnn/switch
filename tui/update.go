@@ -114,11 +114,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
-		if m.splash {
-			m.splash = false
-			if msg.String() == "enter" && strings.TrimSpace(m.input.Value()) == "" {
-				return m, nil
+		if m.modal != "" {
+			switch msg.String() {
+			case "esc", "enter":
+				m.modal = ""
+				m.modalTitle = ""
 			}
+			return m, nil
 		}
 
 		if m.permission != nil {
@@ -166,6 +168,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.input.Reset()
 			m.paletteOpen = false
+			m.home = false
 			m.appendUser(text)
 			m.assistant.Reset()
 			m.busy = true
@@ -223,44 +226,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case planResultMsg:
 		m.busy = false
 		m.state = "ready"
+		m.refreshDashboard()
 		if msg.err != nil {
-			m.appendError("plan: " + msg.err.Error())
+			m.setModal("plan failed", msg.err.Error())
 		} else if msg.result != nil {
-			m.appendSystem(planSummary(msg.result))
+			m.setModal("plan", planSummary(msg.result))
 		}
-		m.refreshViewport()
 		return m, nil
 
 	case doctorResultMsg:
 		m.busy = false
 		m.state = "ready"
 		if msg.err != nil {
-			m.appendError("doctor: " + msg.err.Error())
+			m.setModal("doctor", msg.err.Error())
 		} else {
-			m.appendSystem(msg.report)
+			m.setModal("doctor", msg.report)
 			if !msg.available {
 				m.state = "agent unavailable"
 			}
 		}
-		m.refreshViewport()
 		return m, nil
 
 	case newSessionResultMsg:
 		m.busy = false
 		m.state = "ready"
 		if msg.err != nil {
-			m.appendError("new session: " + msg.err.Error())
-			m.refreshViewport()
+			m.setModal("new session failed", msg.err.Error())
 			return m, waitForActivity(m.chat.Session, m.gen)
 		}
 		m.status = msg.status
 		m.status.Resumed = false
-		m.appendSystem("new session: " + m.chat.Session.ID)
-		m.refreshViewport()
+		m.refreshDashboard()
+		m.setModal("new session", m.chat.Session.ID)
 		return m, waitForActivity(m.chat.Session, m.gen)
 	}
 
 	return m, nil
+}
+
+func (m *model) setModal(title, body string) {
+	m.modalTitle = title
+	m.modal = body
+	m.paletteOpen = false
 }
 
 func (m *model) refreshPalette() {
@@ -419,48 +426,50 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	case "/quit", "/exit":
 		return m, tea.Quit
 
+	case "/home":
+		m.home = true
+		m.modal = ""
+		m.modalTitle = ""
+		m.refreshDashboard()
+
 	case "/rules":
 		if m.rules.Empty() {
-			m.appendSystem("no rules loaded")
+			m.setModal("rules", "no rules loaded")
 		} else {
-			m.appendSystem(m.rules.Text())
+			m.setModal("rules", m.rules.Text())
 		}
 
 	case "/session":
-		m.appendSystem(fmt.Sprintf("agent: %s\nmodel: %s\nsession: %s", m.chat.Agent, m.chat.Model, m.chat.Session.ID))
+		m.setModal("session", fmt.Sprintf("agent: %s\nmodel: %s\nsession: %s", m.chat.Agent, m.chat.Model, m.chat.Session.ID))
 
 	case "/plan":
 		if m.busy {
-			m.appendSystem("busy; wait for the current turn to finish")
+			m.setModal("busy", "wait for the current turn to finish")
 			break
 		}
 		if len(fields) < 2 {
-			m.appendSystem("usage: /plan <goal>  or  /plan --file <path>")
+			m.setModal("plan", "usage: /plan <goal>  or  /plan --file <path>")
 			break
 		}
 		var goal, file string
 		if fields[1] == "--file" {
 			if len(fields) < 3 {
-				m.appendSystem("usage: /plan --file <path>")
+				m.setModal("plan", "usage: /plan --file <path>")
 				break
 			}
 			file, _ = filepath.Abs(fields[2])
 		} else {
 			goal = strings.TrimSpace(strings.TrimPrefix(text, "/plan"))
 		}
-		m.input.Reset()
 		m.busy = true
 		m.state = "planning"
-		m.appendSystem("lead is planning…")
-		m.refreshViewport()
 		return m, planCmd(m.ctx, m.chat.Project, goal, file)
 
 	case "/doctor":
 		if m.busy {
-			m.appendSystem("busy; wait for the current turn to finish")
+			m.setModal("busy", "wait for the current turn to finish")
 			break
 		}
-		m.input.Reset()
 		m.busy = true
 		m.state = "checking"
 		return m, doctorCmd(m.chat.Project)
@@ -468,43 +477,31 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	case "/init":
 		created, err := config.EnsureProject(m.chat.Project)
 		if err != nil {
-			m.appendError("init: " + err.Error())
+			m.setModal("init failed", err.Error())
 		} else if len(created) == 0 {
-			m.appendSystem("project is already initialized")
+			m.setModal("init", "project is already initialized")
 		} else {
-			m.appendSystem("initialized:\n  " + strings.Join(created, "\n  "))
+			m.setModal("init", "created:\n  "+strings.Join(created, "\n  "))
+			m.refreshDashboard()
 		}
 
 	case "/new":
 		if m.busy {
-			m.appendSystem("busy; wait for the current turn to finish")
+			m.setModal("busy", "wait for the current turn to finish")
 			break
 		}
-		m.input.Reset()
 		m.gen++
 		m.busy = true
 		m.state = "new session"
-		m.appendSystem("starting a new session…")
-		m.refreshViewport()
 		return m, newSessionCmd(m.ctx, m.chat)
 
 	case "/help":
-		m.appendSystem(`commands:
-  /plan <goal> - ask the lead to plan and create a run
-  /plan --file <path> - import a plan JSON file
-  /doctor - check config, rules, adapters, and state
-  /init - create .switch config and rules
-  /rules - show effective rules
-  /session - show the current agent session
-  /new - start a new agent session
-  /quit - exit`)
+		m.setModal("help", helpText())
 
 	default:
-		m.appendSystem("unknown command " + command + " (try /help)")
+		m.setModal("unknown command", command+"\ntry /help")
 	}
 
-	m.input.Reset()
-	m.refreshViewport()
 	return m, nil
 }
 
@@ -512,10 +509,11 @@ func planSummary(result *planning.Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "run %s planned\n", shortID(result.Run.ID))
 	fmt.Fprintf(&b, "integration: %s\n", result.Run.IntegrationBranch)
-	b.WriteString("agents:\n")
+	names := make([]string, 0, len(result.Agents))
 	for _, item := range result.Agents {
-		fmt.Fprintf(&b, "  %-10s %-8s %s\n", item.Agent.Name, item.Agent.Role, item.Worktree.Path)
+		names = append(names, item.Agent.Name)
 	}
+	fmt.Fprintf(&b, "agents: %s\n", strings.Join(names, ", "))
 	b.WriteString("tasks:\n")
 	for _, task := range result.Plan.Tasks {
 		deps := "none"
@@ -524,6 +522,6 @@ func planSummary(result *planning.Result) string {
 		}
 		fmt.Fprintf(&b, "  %-12s %-8s deps=%-12s %s\n", task.ID, task.Role, deps, task.Title)
 	}
-	fmt.Fprintf(&b, "worktrees: %s", result.Root)
+	fmt.Fprintf(&b, "worktrees: %s", truncate(result.Root, 56))
 	return b.String()
 }

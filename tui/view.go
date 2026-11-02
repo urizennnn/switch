@@ -9,30 +9,36 @@ import (
 )
 
 func (m model) View() tea.View {
-	if m.splash {
-		return tea.NewView(m.splashView())
-	}
-
 	width := m.width
 	if width <= 0 {
 		width = 80
 	}
 
-	conversation := lipgloss.NewStyle().
-		Padding(0, 2, 0, 2).
-		Height(m.conversationHeight()).
-		Render(m.viewport.View())
-	if m.paletteOpen {
-		conversation = overlayBottom(conversation, m.paletteView(), m.conversationHeight())
+	var body string
+	switch {
+	case m.modal != "":
+		body = m.modalView()
+	case m.home:
+		body = m.dashboardView()
+		if m.paletteOpen {
+			body = overlayBottom(body, m.paletteView(), m.conversationHeight())
+		}
+	default:
+		body = lipgloss.NewStyle().
+			Padding(0, 2, 0, 2).
+			Height(m.conversationHeight()).
+			Render(m.viewport.View())
+		if m.paletteOpen {
+			body = overlayBottom(body, m.paletteView(), m.conversationHeight())
+		}
 	}
 
-	parts := []string{
-		conversation,
+	return tea.NewView(lipgloss.JoinVertical(
+		lipgloss.Left,
+		body,
 		m.inputBar(width),
 		m.statusLine(width),
-	}
-
-	return tea.NewView(lipgloss.JoinVertical(lipgloss.Left, parts...))
+	))
 }
 
 func (m *model) layout() {
@@ -101,12 +107,8 @@ func (m model) paletteView() string {
 		width = 80
 	}
 
-	start := 0
-	end := len(m.palette)
-
 	var b strings.Builder
-	for i := start; i < end; i++ {
-		command := m.palette[i]
+	for i, command := range m.palette {
 		line := fmt.Sprintf("%-28s  %s", command.label(), command.Description)
 		style := mutedStyle
 		if i == m.paletteIndex {
@@ -124,68 +126,147 @@ func (m model) paletteView() string {
 		Render(strings.TrimRight(b.String(), "\n"))
 }
 
-func (m model) splashView() string {
+func (m model) dashboardView() string {
 	width := m.width
 	if width <= 0 {
 		width = 80
 	}
-	colWidth := max(20, (width/2)-4)
+	colWidth := max(24, (width/2)-4)
 
 	left := lipgloss.NewStyle().
 		Width(colWidth).
 		Padding(1, 2).
 		Render(lipgloss.JoinVertical(lipgloss.Left,
 			lipgloss.NewStyle().Foreground(accent).Bold(true).Render("switch"),
-			lipgloss.NewStyle().Foreground(dim).Render("multi-agent orchestration"),
+			dimStyle.Render("project"),
+			mutedStyle.Render(truncate(m.chat.Project, colWidth-4)),
 			"\n",
-			lipgloss.NewStyle().Foreground(muted).Render(
-				fmt.Sprintf("%s\n%s", m.chat.Agent, m.chat.Model),
-			),
-			lipgloss.NewStyle().Foreground(dim).Render(m.chat.Project),
+			dimStyle.Render("agent"),
+			mutedStyle.Render(m.chat.Agent+" · "+m.chat.Model),
+			dimStyle.Render(fmt.Sprintf("session %s (%s)", shortID(m.chat.Session.ID), sessionState(m.status.Resumed))),
+			dimStyle.Render("state "+m.state),
+			"\n",
+			dimStyle.Render(m.ruleSummary()),
+			dimStyle.Render(fmt.Sprintf("fleet %d agents", len(m.dashboardFleet()))),
 		))
 
-	dividerHeight := lipgloss.Height(left)
+	var run strings.Builder
+	run.WriteString(sectionTitle("run"))
+	if m.run == nil {
+		run.WriteString(mutedStyle.Render("no run yet · use /plan <goal>"))
+		run.WriteString("\n")
+	} else {
+		queued, running, done := m.taskCounts()
+		run.WriteString(mutedStyle.Render(fmt.Sprintf("%s · %s", shortID(m.run.ID), m.run.Status)))
+		run.WriteString("\n")
+		run.WriteString(mutedStyle.Render("goal: " + truncate(m.run.Goal, colWidth-4)))
+		run.WriteString("\n")
+		run.WriteString(mutedStyle.Render(fmt.Sprintf("tasks %d queued · %d running · %d done", queued, running, done)))
+		run.WriteString("\n")
+		run.WriteString(dimStyle.Render("agents " + fmt.Sprintf("%d", len(m.runAgents))))
+	}
+
+	var fleet strings.Builder
+	fleet.WriteString(sectionTitle("fleet"))
+	for _, agent := range m.dashboardFleet() {
+		fleet.WriteString(mutedStyle.Render(fmt.Sprintf("%-10s %-8s %s", agent.Name, agent.Role, agent.Driver)))
+		fleet.WriteString("\n")
+	}
+
+	var commands strings.Builder
+	commands.WriteString(sectionTitle("commands"))
+	for i, command := range slashCommands {
+		if i >= 4 {
+			commands.WriteString(dimStyle.Render("type / for all commands"))
+			commands.WriteString("\n")
+			break
+		}
+		commands.WriteString(mutedStyle.Render(fmt.Sprintf("%-24s %s", command.label(), command.Description)))
+		commands.WriteString("\n")
+	}
+
+	var keys strings.Builder
+	keys.WriteString(sectionTitle("keys"))
+	for _, line := range keyLines() {
+		keys.WriteString(mutedStyle.Render(line))
+		keys.WriteString("\n")
+	}
+
+	right := lipgloss.NewStyle().
+		Width(colWidth).
+		Padding(1, 2).
+		Render(lipgloss.JoinVertical(lipgloss.Left,
+			run.String(),
+			"",
+			fleet.String(),
+			"",
+			commands.String(),
+			"",
+			keys.String(),
+		))
+
+	dividerHeight := max(lipgloss.Height(left), lipgloss.Height(right))
 	var dividerStr strings.Builder
 	for range dividerHeight {
 		dividerStr.WriteString("│\n")
 	}
 	mid := lipgloss.NewStyle().Foreground(border).Render(dividerStr.String())
 
-	right := lipgloss.NewStyle().
-		Width(colWidth).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left,
-			lipgloss.NewStyle().Foreground(accent).Bold(true).Render("Getting started"),
-			lipgloss.NewStyle().Foreground(muted).Render(
-				"Type / to browse commands.\nAsk the lead to plan a run.",
-			),
-			"\n",
-			lipgloss.NewStyle().Foreground(teal).Bold(true).Render("Slash commands"),
-			lipgloss.NewStyle().Foreground(muted).Render(
-				lipgloss.NewStyle().Foreground(text).Render("/plan")+"   plan a run\n"+
-					lipgloss.NewStyle().Foreground(text).Render("/doctor")+" check the setup\n"+
-					lipgloss.NewStyle().Foreground(text).Render("/rules")+"  show rules",
-			),
-			"\n",
-			lipgloss.NewStyle().Foreground(teal).Bold(true).Render("Keybindings"),
-			lipgloss.NewStyle().Foreground(muted).Render(
-				lipgloss.NewStyle().Foreground(text).Render("enter")+" send   "+
-					lipgloss.NewStyle().Foreground(text).Render("tab")+" complete\n"+
-					lipgloss.NewStyle().Foreground(text).Render("esc")+" cancel   "+
-					lipgloss.NewStyle().Foreground(text).Render("ctrl+c")+" quit",
-			),
-		))
-
 	columns := lipgloss.JoinHorizontal(lipgloss.Top, left, mid, right)
-	box := lipgloss.NewStyle().
+	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(border).
 		Width(width - 2).
+		Height(m.conversationHeight()).
 		Render(columns)
+}
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		box,
-		m.inputBar(width),
-		m.statusLine(width),
-	)
+func (m model) modalView() string {
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	height := m.conversationHeight()
+
+	content := sectionTitle(m.modalTitle) + "\n" + m.modal
+	content = truncateLines(content, max(3, height-4))
+	content += "\n\n" + dimStyle.Render("esc or enter to close")
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accent).
+		Padding(1, 2).
+		Width(width - 2).
+		Height(height).
+		Render(content)
+}
+
+func sectionTitle(text string) string {
+	return lipgloss.NewStyle().Foreground(teal).Bold(true).Render(text) + "\n"
+}
+
+func sessionState(resumed bool) string {
+	if resumed {
+		return "resumed"
+	}
+	return "new"
+}
+
+func truncate(value string, limit int) string {
+	if limit < 1 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit-1]) + "…"
+}
+
+func truncateLines(value string, limit int) string {
+	lines := strings.Split(value, "\n")
+	if len(lines) <= limit {
+		return value
+	}
+	return strings.Join(lines[:limit], "\n") + "\n" + dimStyle.Render("…")
 }

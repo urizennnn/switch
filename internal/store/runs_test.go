@@ -81,3 +81,33 @@ func TestRunAgentsAndTasksRoundTrip(t *testing.T) {
 		t.Fatalf("acceptance = %#v", tasks[0].Acceptance)
 	}
 }
+
+func TestLatestRun(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	for _, id := range []string{"run-1", "run-2"} {
+		if err := store.CreateRun(ctx, Run{
+			ID:                id,
+			Project:           "/tmp/project",
+			Goal:              id,
+			BaseRef:           "base",
+			IntegrationBranch: "switch/" + id + "/integration",
+			Status:            "planned",
+		}); err != nil {
+			t.Fatalf("CreateRun %s: %v", id, err)
+		}
+	}
+
+	run, ok, err := store.LatestRun(ctx, "/tmp/project")
+	if err != nil || !ok {
+		t.Fatalf("LatestRun = ok %v, err %v", ok, err)
+	}
+	if run.ID != "run-2" {
+		t.Fatalf("latest run = %q, want run-2", run.ID)
+	}
+}

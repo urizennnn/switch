@@ -54,8 +54,13 @@ go build -o switch .
 | `/rules` | Show effective global/project rules |
 | `/session` | Show the current agent session |
 | `/new` | Start a new agent session |
+| `/home` | Return to the dashboard |
 | `/help` | Show commands |
 | `/quit` | Exit |
+
+The dashboard is built from live state: project, agent, model, session, rules,
+fleet, latest run, task counts, commands, and keys. Slash commands operate over
+the dashboard without clearing it; `/home` returns to it after chatting.
 
 Type `/` to open the command palette. It filters as you type, shows
 descriptions, and supports up/down, tab completion, and enter. Anything that
