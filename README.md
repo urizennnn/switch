@@ -16,7 +16,8 @@ The design is vendor-agnostic and built on the [Agent Client Protocol](https://a
 | Capability report | Working |
 | TUI chat shell | Wired to the engine with streaming, history, permissions, and resume |
 | Config, rules, SQLite state | Working (`switch init`, `switch chat`, `switch doctor`) |
-| Task engine, worktrees, lead/worker flow | Planned (Phase 2+) |
+| Plan generation + run worktrees | Working (`switch plan`, lead-generated or `--file`) |
+| Task execution, scheduler, review/merge | In progress (Phase 2; planning foundation done) |
 
 See [`docs/architecture.md`](docs/architecture.md) for the full architecture, language choice, phases, and risks.
 
@@ -49,6 +50,12 @@ go build -o switch .
 
 # Check config, rules, state, and adapters
 ./switch doctor
+
+# Ask the lead to plan a run; creates agent worktrees
+./switch plan "Add a health endpoint"
+
+# Or import a plan without calling a model
+./switch plan --file plan.json
 
 # See which adapters are available locally
 ./switch probe --list
@@ -135,12 +142,17 @@ The probe implementation lives in:
 - `internal/driver/acpdriver/client.go` — `acp.Client` bridge and permission policy
 - `internal/driver/acpdriver/probe.go` — lifecycle, capabilities, prompt, resume
 - `internal/probe/probe.go` — CLI flags
+- `internal/plan/` — plan schema and DAG validation
+- `internal/worktree/` — git worktree creation and cleanup
+- `internal/plancli/` — `switch plan` lead prompt and run creation
 
 The `tui/` package is now wired to the chat engine. `switch` opens the TUI; `switch chat` provides the same engine as a line-based REPL.
 
 ## Known limitations
 
-- The TUI supports one resumable agent chat. Lead/worker orchestration, task state, and worktrees are Phase 2 work.
+- The TUI supports one resumable agent chat.
+- `switch plan` creates a run, agent worktrees, and persisted tasks; task execution and review are the next Phase 2 step.
+- Task execution currently stops after planning; no worker has been dispatched yet.
 - OpenClaw is untested because it is not installed on this machine.
 - OpenCode's default model may hit provider privacy settings; use `--model` to choose a permitted model.
 - Claude adapter hooks/plugins can add stderr noise; use `--agent-logs` only when debugging.

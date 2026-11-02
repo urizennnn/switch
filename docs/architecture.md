@@ -548,3 +548,30 @@ Not yet implemented (Phase 2):
 - Git worktrees, verification runner, review, and merge queue
 - Control socket, agent-facing CLI, and MCP bridge
 - Role-scoped rule compilation
+
+---
+
+## 17. Phase 2 progress (2026-11-02)
+
+Implemented:
+
+- Plan schema with dependency/cycle validation (`internal/plan`)
+- Durable runs, run agents, and tasks in SQLite
+- Git worktree manager with per-run integration and agent worktrees
+- `switch plan`:
+  - asks the configured lead for a JSON plan, or imports `--file`
+  - creates the run integration branch and a worktree per configured agent
+  - persists the plan as queued tasks with mapped dependencies
+  - prints run, agent, and task summaries
+
+Configured fleet defaults to one lead plus two builders. Projects created by
+`switch init` get three OpenCode agents; edit `.switch/config.toml` to mix
+drivers/models.
+
+Not yet implemented:
+
+- Dispatching queued tasks to workers
+- Task worktrees and assignment/branch lifecycle
+- Verification runner, lead review, and merge queue
+- Control socket, agent-facing CLI, and MCP bridge
+- Fleet/task TUI views
