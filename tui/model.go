@@ -44,11 +44,16 @@ type model struct {
 	gen           int
 	permission    *acpdriver.PermissionRequest
 	err           error
+
+	splash       bool
+	palette      []slashCommand
+	paletteIndex int
+	paletteOpen  bool
 }
 
 func New(opts Options) model {
 	input := textinput.New()
-	input.Placeholder = "message the agent…"
+	input.Placeholder = "State your wish"
 	input.Prompt = ""
 	input.SetVirtualCursor(true)
 	input.SetWidth(60)
@@ -72,10 +77,12 @@ func New(opts Options) model {
 		width:    80,
 		height:   24,
 		state:    "ready",
+		splash:   true,
 	}
 
 	m.transcript = m.initialTranscript()
 	m.refreshViewport()
+	m.layout()
 	return m
 }
 
@@ -109,7 +116,7 @@ func (m model) initialTranscript() string {
 				b.WriteString(textStyle.Render(message.Content))
 				b.WriteString("\n\n")
 			case "assistant":
-				b.WriteString(agentStyle.Render("agent"))
+				b.WriteString(agentStyle.Render("switch"))
 				b.WriteString("  ")
 				b.WriteString(textStyle.Render(message.Content))
 				b.WriteString("\n\n")
@@ -140,7 +147,7 @@ func (m *model) appendAssistantChunk(text string) {
 		if m.transcript != "" && !strings.HasSuffix(m.transcript, "\n\n") {
 			m.transcript += "\n\n"
 		}
-		m.transcript += agentStyle.Render("agent") + "  "
+		m.transcript += agentStyle.Render("switch") + "  "
 		m.assistantOpen = true
 	}
 	m.transcript += textStyle.Render(text)

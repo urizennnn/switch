@@ -21,3 +21,8 @@ var (
 	headerStyle  = lipgloss.NewStyle().Foreground(accent).Bold(true)
 	dividerStyle = lipgloss.NewStyle().Foreground(border)
 )
+
+var paletteSelected = lipgloss.NewStyle().
+	Foreground(text).
+	Background(lipgloss.Color("#2a2f3a")).
+	Bold(true)

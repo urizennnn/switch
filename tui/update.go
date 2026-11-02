@@ -110,14 +110,46 @@ func newSessionCmd(ctx context.Context, conversation *chat.Chat) tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+
+		if m.splash {
+			m.splash = false
+			if msg.String() == "enter" && strings.TrimSpace(m.input.Value()) == "" {
+				return m, nil
+			}
+		}
+
 		if m.permission != nil {
 			return m.handlePermissionKey(msg)
 		}
 
-		switch msg.String() {
-		case "ctrl+c":
-			return m, tea.Quit
+		if m.paletteOpen {
+			switch msg.String() {
+			case "up":
+				if m.paletteIndex > 0 {
+					m.paletteIndex--
+				}
+				return m, nil
+			case "down":
+				if m.paletteIndex < len(m.palette)-1 {
+					m.paletteIndex++
+				}
+				return m, nil
+			case "tab":
+				m.fillSelectedCommand()
+				return m, nil
+			case "esc":
+				m.paletteOpen = false
+				m.layout()
+				return m, nil
+			case "enter":
+				return m.handlePaletteEnter()
+			}
+		}
 
+		switch msg.String() {
 		case "esc":
 			if m.busy && m.state == "working" {
 				_ = m.chat.Session.Cancel(context.Background())
@@ -134,24 +166,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.handleSlash(text)
 			}
 			m.input.Reset()
+			m.paletteOpen = false
 			m.appendUser(text)
 			m.assistant.Reset()
 			m.busy = true
 			m.state = "working"
+			m.layout()
 			m.refreshViewport()
 			return m, sendPrompt(m.ctx, m.chat, text)
 		}
 
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
+		m.refreshPalette()
+		m.layout()
 		return m, cmd
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.viewport.SetWidth(max(20, msg.Width-2))
-		m.viewport.SetHeight(max(5, msg.Height-8))
-		m.input.SetWidth(max(10, msg.Width-4))
+		m.layout()
 		m.refreshViewport()
 		return m, nil
 
@@ -230,6 +264,70 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *model) refreshPalette() {
+	matches := matchCommands(m.input.Value())
+	wasOpen := m.paletteOpen
+	m.palette = matches
+	m.paletteOpen = len(matches) > 0
+	if m.paletteOpen && !wasOpen {
+		m.paletteIndex = 0
+	}
+	if m.paletteIndex >= len(matches) {
+		m.paletteIndex = max(0, len(matches)-1)
+	}
+	if !m.paletteOpen {
+		m.paletteIndex = 0
+	}
+	if wasOpen != m.paletteOpen {
+		m.layout()
+	}
+}
+
+func (m *model) fillSelectedCommand() {
+	if len(m.palette) == 0 {
+		return
+	}
+	command := m.palette[m.paletteIndex]
+	if command.NeedsArg {
+		m.input.SetValue(command.Name + " ")
+	} else {
+		m.input.SetValue(command.Name)
+	}
+	m.input.CursorEnd()
+	m.paletteOpen = false
+	m.layout()
+}
+
+func (m model) handlePaletteEnter() (tea.Model, tea.Cmd) {
+	typed := strings.TrimSpace(m.input.Value())
+	if command, ok := findCommand(typed); ok {
+		if command.NeedsArg {
+			m.input.SetValue(command.Name + " ")
+			m.input.CursorEnd()
+			m.paletteOpen = false
+			m.layout()
+			return m, nil
+		}
+		m.paletteOpen = false
+		m.layout()
+		return m.handleSlash(command.Name)
+	}
+	if len(m.palette) == 0 {
+		return m, nil
+	}
+	command := m.palette[m.paletteIndex]
+	if command.NeedsArg {
+		m.input.SetValue(command.Name + " ")
+		m.input.CursorEnd()
+		m.paletteOpen = false
+		m.layout()
+		return m, nil
+	}
+	m.paletteOpen = false
+	m.layout()
+	return m.handleSlash(command.Name)
 }
 
 func (m model) handleAgentEvent(event acpdriver.Event) (tea.Model, tea.Cmd) {
@@ -324,6 +422,9 @@ func (m model) handlePermissionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
+	m.paletteOpen = false
+	m.input.Reset()
+	m.layout()
 	fields := strings.Fields(text)
 	command := fields[0]
 	switch command {
@@ -415,6 +516,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	}
 
 	m.input.Reset()
+	m.layout()
 	m.refreshViewport()
 	return m, nil
 }

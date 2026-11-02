@@ -57,7 +57,9 @@ go build -o switch .
 | `/help` | Show commands |
 | `/quit` | Exit |
 
-Anything that does not start with `/` is sent to the agent.
+Type `/` to open the command palette. It filters as you type, shows
+descriptions, and supports up/down, tab completion, and enter. Anything that
+does not start with `/` is sent to the agent.
 
 ### Headless commands
 
