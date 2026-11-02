@@ -106,27 +106,25 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `switch — multi-agent orchestration for coding agents
 
 Usage:
-  switch                  start the TUI
-  switch init [dir]       create project config and rules
-  switch chat [flags]     chat with one agent (resumable)
-  switch plan [goal]      ask the lead for a plan and create a run/worktrees
-  switch doctor [dir]     check config, adapters, rules, and state
-  switch probe [flags]    connect to one ACP agent and stream a prompt
-  switch version          print the version
+  switch                  start the TUI (primary interface)
   switch help             show this help
 
-Chat examples:
-  switch chat
-  switch chat --agent codex
-  switch chat --new
-  switch chat --permission deny
+TUI commands:
+  /plan <goal>            ask the lead to plan and create a run
+  /plan --file <path>     import a plan JSON file
+  /doctor                 check config, rules, adapters, and state
+  /init                   create .switch config and rules
+  /rules                  show effective rules
+  /session                show the current agent session
+  /new                    start a new agent session
+  /quit                   exit
 
-Probe examples:
-  switch probe --list
-  switch probe --agent opencode --no-prompt
-  switch probe --agent opencode --model <model> --prompt "Say hello"
-  switch probe --agent codex --no-prompt
-  switch probe --agent claude --prompt "Say hello in one sentence"
-  switch probe --agent opencode --session <session-id>
+Headless commands (automation):
+  switch chat [flags]     chat without the TUI
+  switch plan [goal]      plan and create worktrees without the TUI
+  switch doctor [dir]     raw diagnostics
+  switch init [dir]       create project config and rules
+  switch probe [flags]    connect to one ACP agent and stream a prompt
+  switch version          print the version
 `)
 }

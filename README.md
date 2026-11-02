@@ -1,6 +1,6 @@
 # Switch
 
-> **⚠️ Early development — Phase 1 chat shell complete.**
+> **⚠️ Early development — Phase 2 planning foundation complete.**
 
 Switch is a terminal orchestrator for a fleet of existing coding agents. It does not call models itself. It launches vendor CLIs as subprocesses, gives each one a role and an isolated workspace, and lets exactly one agent — the lead — plan, delegate, review, and talk to you. You converse only with the lead.
 
@@ -15,6 +15,7 @@ The design is vendor-agnostic and built on the [Agent Client Protocol](https://a
 | Permission allow / deny bridge | Working (verified with Claude; interactive ask path implemented) |
 | Capability report | Working |
 | TUI chat shell | Wired to the engine with streaming, history, permissions, and resume |
+| TUI slash commands | `/plan`, `/doctor`, `/init`, `/rules`, `/session`, `/new` |
 | Config, rules, SQLite state | Working (`switch init`, `switch chat`, `switch doctor`) |
 | Plan generation + run worktrees | Working (`switch plan`, lead-generated or `--file`) |
 | Task execution, scheduler, review/merge | In progress (Phase 2; planning foundation done) |
@@ -35,44 +36,43 @@ The Codex and Claude adapters are Node processes. `npx` is used as a fallback; i
 ## Quick start
 
 ```bash
-# Build
 go build -o switch .
-
-# Optional: create project config and starter rules explicitly.
-# `switch` and `switch chat` also do this automatically on first run.
-./switch init
-
-# Start the TUI (one resumable agent chat)
 ./switch
-
-# Or use the line-based REPL
-./switch chat
-
-# Check config, rules, state, and adapters
-./switch doctor
-
-# Ask the lead to plan a run; creates agent worktrees
-./switch plan "Add a health endpoint"
-
-# Or import a plan without calling a model
-./switch plan --file plan.json
-
-# See which adapters are available locally
-./switch probe --list
-
-# Verify the ACP connection without prompting
-./switch probe --agent opencode --no-prompt
-
-# Run one prompt through each vendor
-./switch probe --agent opencode \
-  --model opencode/deepseek-v4.1-flash-free \
-  --prompt "Reply with exactly: switch probe ok"
-
-./switch probe --agent codex --prompt "Reply with exactly: switch probe ok"
-./switch probe --agent claude --prompt "Reply with exactly: switch probe ok"
 ```
 
-Resume a session by passing the session ID printed by a previous run:
+`switch` is the primary interface. It auto-creates `.switch/config.toml` and
+`.switch/rules.md` on first run in a project.
+
+### TUI commands
+
+| Command | Purpose |
+|---|---|
+| `/plan <goal>` | Ask the lead to plan and create a run with worktrees |
+| `/plan --file <path>` | Import a plan JSON file |
+| `/doctor` | Check config, rules, adapters, and state |
+| `/init` | Create `.switch` config and rules explicitly |
+| `/rules` | Show effective global/project rules |
+| `/session` | Show the current agent session |
+| `/new` | Start a new agent session |
+| `/help` | Show commands |
+| `/quit` | Exit |
+
+Anything that does not start with `/` is sent to the agent.
+
+### Headless commands
+
+The same engine is available without the TUI for automation:
+
+```bash
+./switch chat
+./switch plan "Add a health endpoint"
+./switch plan --file plan.json
+./switch doctor
+./switch probe --list
+./switch probe --agent opencode --no-prompt
+```
+
+Resume a probe session by passing the session ID printed by a previous run:
 
 ```bash
 ./switch probe --agent opencode --session <session-id> \

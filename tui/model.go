@@ -41,6 +41,7 @@ type model struct {
 	assistantOpen bool
 	busy          bool
 	state         string
+	gen           int
 	permission    *acpdriver.PermissionRequest
 	err           error
 }
@@ -81,7 +82,7 @@ func New(opts Options) model {
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		textinput.Blink,
-		waitForActivity(m.chat.Session),
+		waitForActivity(m.chat.Session, m.gen),
 	)
 }
 
@@ -117,7 +118,7 @@ func (m model) initialTranscript() string {
 	}
 
 	if b.Len() == 0 {
-		b.WriteString(systemStyle.Render("New session. Type a message below."))
+		b.WriteString(systemStyle.Render("New session. Type /help for commands or a message below."))
 		b.WriteString("\n")
 	}
 	return b.String()

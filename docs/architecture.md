@@ -558,11 +558,13 @@ Implemented:
 - Plan schema with dependency/cycle validation (`internal/plan`)
 - Durable runs, run agents, and tasks in SQLite
 - Git worktree manager with per-run integration and agent worktrees
-- `switch plan`:
-  - asks the configured lead for a JSON plan, or imports `--file`
-  - creates the run integration branch and a worktree per configured agent
-  - persists the plan as queued tasks with mapped dependencies
-  - prints run, agent, and task summaries
+- `switch plan` (headless) and TUI `/plan`:
+  - ask the configured lead for a JSON plan, or import `--file`
+  - create the run integration branch and a worktree per configured agent
+  - persist the plan as queued tasks with mapped dependencies
+  - report run, agent, and task summaries
+- TUI slash commands: `/plan`, `/doctor`, `/init`, `/rules`, `/session`,
+  `/new`, `/help`, `/quit`
 
 Configured fleet defaults to one lead plus two builders. Projects created by
 `switch init` get three OpenCode agents; edit `.switch/config.toml` to mix
