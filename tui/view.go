@@ -20,16 +20,17 @@ func (m model) View() tea.View {
 
 	conversation := lipgloss.NewStyle().
 		Padding(0, 2, 0, 2).
+		Height(m.conversationHeight()).
 		Render(m.viewport.View())
-
-	parts := []string{conversation}
 	if m.paletteOpen {
-		parts = append(parts, m.paletteView())
+		conversation = overlayBottom(conversation, m.paletteView(), m.conversationHeight())
 	}
-	parts = append(parts,
+
+	parts := []string{
+		conversation,
 		m.inputBar(width),
 		m.statusLine(width),
-	)
+	}
 
 	return tea.NewView(lipgloss.JoinVertical(lipgloss.Left, parts...))
 }
@@ -39,19 +40,40 @@ func (m *model) layout() {
 	if width <= 0 {
 		width = 80
 	}
+	m.viewport.SetWidth(max(20, width-2))
+	m.viewport.SetHeight(m.conversationHeight())
+	m.input.SetWidth(max(10, width-4))
+}
+
+func (m model) conversationHeight() int {
 	height := m.height
 	if height <= 0 {
 		height = 24
 	}
+	return max(5, height-5)
+}
 
-	paletteHeight := 0
-	if m.paletteOpen {
-		paletteHeight = len(m.palette) + 2
+// overlayBottom draws overlay over the last lines of base without changing
+// the surrounding layout. The command palette floats over the conversation
+// instead of resizing it.
+func overlayBottom(base, overlay string, height int) string {
+	baseLines := strings.Split(strings.TrimRight(base, "\n"), "\n")
+	for len(baseLines) < height {
+		baseLines = append(baseLines, "")
+	}
+	if len(baseLines) > height {
+		baseLines = baseLines[:height]
 	}
 
-	m.viewport.SetWidth(max(20, width-2))
-	m.viewport.SetHeight(max(5, height-5-paletteHeight))
-	m.input.SetWidth(max(10, width-4))
+	overlayLines := strings.Split(strings.TrimRight(overlay, "\n"), "\n")
+	if len(overlayLines) > len(baseLines) {
+		overlayLines = overlayLines[len(overlayLines)-len(baseLines):]
+	}
+	start := len(baseLines) - len(overlayLines)
+	for i, line := range overlayLines {
+		baseLines[start+i] = line
+	}
+	return strings.Join(baseLines, "\n")
 }
 
 func (m model) inputBar(width int) string {

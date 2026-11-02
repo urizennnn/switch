@@ -142,7 +142,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "esc":
 				m.paletteOpen = false
-				m.layout()
 				return m, nil
 			case "enter":
 				return m.handlePaletteEnter()
@@ -171,7 +170,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.assistant.Reset()
 			m.busy = true
 			m.state = "working"
-			m.layout()
 			m.refreshViewport()
 			return m, sendPrompt(m.ctx, m.chat, text)
 		}
@@ -179,7 +177,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		m.refreshPalette()
-		m.layout()
 		return m, cmd
 
 	case tea.WindowSizeMsg:
@@ -280,9 +277,6 @@ func (m *model) refreshPalette() {
 	if !m.paletteOpen {
 		m.paletteIndex = 0
 	}
-	if wasOpen != m.paletteOpen {
-		m.layout()
-	}
 }
 
 func (m *model) fillSelectedCommand() {
@@ -297,7 +291,6 @@ func (m *model) fillSelectedCommand() {
 	}
 	m.input.CursorEnd()
 	m.paletteOpen = false
-	m.layout()
 }
 
 func (m model) handlePaletteEnter() (tea.Model, tea.Cmd) {
@@ -307,11 +300,9 @@ func (m model) handlePaletteEnter() (tea.Model, tea.Cmd) {
 			m.input.SetValue(command.Name + " ")
 			m.input.CursorEnd()
 			m.paletteOpen = false
-			m.layout()
 			return m, nil
 		}
 		m.paletteOpen = false
-		m.layout()
 		return m.handleSlash(command.Name)
 	}
 	if len(m.palette) == 0 {
@@ -322,11 +313,9 @@ func (m model) handlePaletteEnter() (tea.Model, tea.Cmd) {
 		m.input.SetValue(command.Name + " ")
 		m.input.CursorEnd()
 		m.paletteOpen = false
-		m.layout()
 		return m, nil
 	}
 	m.paletteOpen = false
-	m.layout()
 	return m.handleSlash(command.Name)
 }
 
@@ -424,7 +413,6 @@ func (m model) handlePermissionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	m.paletteOpen = false
 	m.input.Reset()
-	m.layout()
 	fields := strings.Fields(text)
 	command := fields[0]
 	switch command {
@@ -516,7 +504,6 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	}
 
 	m.input.Reset()
-	m.layout()
 	m.refreshViewport()
 	return m, nil
 }
