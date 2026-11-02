@@ -19,6 +19,7 @@ var slashCommands = []slashCommand{
 	{Name: "/init", Description: "create config"},
 	{Name: "/rules", Description: "show rules"},
 	{Name: "/session", Description: "show session"},
+	{Name: "/lead", Args: "<agent>", Description: "choose the lead", NeedsArg: true},
 	{Name: "/new", Description: "new session"},
 	{Name: "/home", Description: "dashboard"},
 	{Name: "/help", Description: "show help"},

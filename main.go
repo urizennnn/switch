@@ -87,10 +87,30 @@ func runTUI() error {
 	defer state.Close()
 
 	ctx := context.Background()
+	lead := cfg.LeadAgent()
+	if name, ok, _ := state.LeadAgent(ctx, project); ok {
+		for _, agent := range cfg.Fleet() {
+			if agent.Name == name {
+				lead = agent
+				break
+			}
+		}
+	} else if stored, ok, _ := state.GetChatSession(ctx, project); ok {
+		for _, agent := range cfg.Fleet() {
+			if agent.Driver == stored.Agent {
+				lead = agent
+				if stored.Model != "" {
+					lead.Model = stored.Model
+				}
+				break
+			}
+		}
+	}
+
 	conversation, status, err := chat.Open(ctx, chat.Options{
 		Project: project,
-		Agent:   cfg.Agent,
-		Model:   cfg.Model,
+		Agent:   lead.Driver,
+		Model:   lead.Model,
 		Rules:   ruleSet,
 		Store:   state,
 	})
@@ -113,6 +133,7 @@ func runTUI() error {
 		Status:  status,
 		Created: created,
 		Fleet:   cfg.Fleet(),
+		Lead:    lead,
 	}))
 	_, err = program.Run()
 	return err
@@ -133,6 +154,7 @@ Inside the TUI, type / to open the command palette:
   /init                   create .switch config and rules
   /rules                  show effective rules
   /session                show the current agent session
+  /lead <agent>           choose which fleet agent leads
   /new                    start a new agent session
   /quit                   exit
 `)

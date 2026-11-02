@@ -23,6 +23,7 @@ type Options struct {
 	Status  chat.Status
 	Created []string
 	Fleet   []config.Agent
+	Lead    config.Agent
 }
 
 type model struct {
@@ -33,6 +34,7 @@ type model struct {
 	status  chat.Status
 	created []string
 	fleet   []config.Agent
+	lead    config.Agent
 
 	input    textinput.Model
 	viewport viewport.Model
@@ -81,12 +83,17 @@ func New(opts Options) model {
 		status:   opts.Status,
 		created:  opts.Created,
 		fleet:    opts.Fleet,
+		lead:     opts.Lead,
 		input:    input,
 		viewport: viewportModel,
 		width:    80,
 		height:   24,
 		state:    "ready",
 		home:     true,
+	}
+
+	if m.lead.Name == "" {
+		m.lead = config.Agent{Name: m.chat.Agent, Role: "lead", Driver: m.chat.Agent, Model: m.chat.Model}
 	}
 
 	m.transcript = m.initialTranscript()
@@ -185,19 +192,6 @@ func (m *model) refreshViewport() {
 	content := strings.TrimRight(m.transcript, "\n")
 	m.viewport.SetContent(content)
 	m.viewport.GotoBottom()
-}
-
-func (m model) header() string {
-	agent := m.chat.Agent
-	if m.chat.Model != "" {
-		agent += " · " + m.chat.Model
-	}
-	state := "new"
-	if m.status.Resumed {
-		state = "resumed"
-	}
-	return headerStyle.Render("switch") +
-		dimStyle.Render("  "+agent+"  ·  session "+shortID(m.chat.Session.ID)+" ("+state+")")
 }
 
 func (m model) ruleSummary() string {

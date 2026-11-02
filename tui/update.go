@@ -50,6 +50,12 @@ type newSessionResultMsg struct {
 	err    error
 }
 
+type leadChangedMsg struct {
+	agent  config.Agent
+	status chat.Status
+	err    error
+}
+
 func waitForActivity(session *acpdriver.Session, gen int) tea.Cmd {
 	return func() tea.Msg {
 		select {
@@ -79,7 +85,7 @@ func saveAssistant(ctx context.Context, conversation *chat.Chat, text string) te
 	}
 }
 
-func planCmd(ctx context.Context, project, goal, file string) tea.Cmd {
+func planCmd(ctx context.Context, project, goal, file string, lead config.Agent) tea.Cmd {
 	return func() tea.Msg {
 		planCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		defer cancel()
@@ -87,6 +93,7 @@ func planCmd(ctx context.Context, project, goal, file string) tea.Cmd {
 			Project:    project,
 			Goal:       goal,
 			File:       file,
+			Lead:       &lead,
 			Permission: acpdriver.PermissionDeny,
 		})
 		return planResultMsg{result: result, err: err}
@@ -104,6 +111,13 @@ func newSessionCmd(ctx context.Context, conversation *chat.Chat) tea.Cmd {
 	return func() tea.Msg {
 		status, err := conversation.NewSession(ctx)
 		return newSessionResultMsg{status: status, err: err}
+	}
+}
+
+func switchLeadCmd(ctx context.Context, conversation *chat.Chat, agent config.Agent) tea.Cmd {
+	return func() tea.Msg {
+		status, err := conversation.SwitchAgent(ctx, agent.Driver, agent.Model)
+		return leadChangedMsg{agent: agent, status: status, err: err}
 	}
 }
 
@@ -258,6 +272,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status.Resumed = false
 		m.refreshDashboard()
 		m.setModal("new session", m.chat.Session.ID)
+		return m, waitForActivity(m.chat.Session, m.gen)
+
+	case leadChangedMsg:
+		m.busy = false
+		m.state = "ready"
+		if msg.err != nil {
+			m.setModal("lead switch failed", msg.err.Error())
+			return m, waitForActivity(m.chat.Session, m.gen)
+		}
+		m.lead = msg.agent
+		m.status = msg.status
+		m.status.Resumed = false
+		if m.store != nil {
+			_ = m.store.SetLeadAgent(m.ctx, m.chat.Project, msg.agent.Name)
+		}
+		m.refreshDashboard()
+		m.setModal("lead", fmt.Sprintf("%s is now the lead (%s)", msg.agent.Name, msg.agent.Driver))
 		return m, waitForActivity(m.chat.Session, m.gen)
 	}
 
@@ -440,7 +471,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		}
 
 	case "/session":
-		m.setModal("session", fmt.Sprintf("agent: %s\nmodel: %s\nsession: %s", m.chat.Agent, m.chat.Model, m.chat.Session.ID))
+		m.setModal("session", fmt.Sprintf("lead: %s\ndriver: %s\nmodel: %s\nsession: %s", m.lead.Name, m.chat.Agent, m.chat.Model, m.chat.Session.ID))
 
 	case "/plan":
 		if m.busy {
@@ -463,7 +494,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		}
 		m.busy = true
 		m.state = "planning"
-		return m, planCmd(m.ctx, m.chat.Project, goal, file)
+		return m, planCmd(m.ctx, m.chat.Project, goal, file, m.lead)
 
 	case "/doctor":
 		if m.busy {
@@ -484,6 +515,44 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 			m.setModal("init", "created:\n  "+strings.Join(created, "\n  "))
 			m.refreshDashboard()
 		}
+
+	case "/lead":
+		if m.busy {
+			m.setModal("busy", "wait for the current turn to finish")
+			break
+		}
+		if len(fields) < 2 {
+			var b strings.Builder
+			fmt.Fprintf(&b, "current: %s\n\n", m.lead.Name)
+			for _, agent := range m.dashboardFleet() {
+				fmt.Fprintf(&b, "  %-10s %-8s %s\n", agent.Name, agent.Role, agent.Driver)
+			}
+			b.WriteString("\nuse /lead <name>")
+			m.setModal("lead", b.String())
+			break
+		}
+		name := fields[1]
+		var selected config.Agent
+		found := false
+		for _, agent := range m.dashboardFleet() {
+			if agent.Name == name {
+				selected = agent
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.setModal("lead", "unknown agent "+name+"\n\nuse /lead to list agents")
+			break
+		}
+		if selected.Name == m.lead.Name {
+			m.setModal("lead", selected.Name+" is already the lead")
+			break
+		}
+		m.gen++
+		m.busy = true
+		m.state = "switching lead"
+		return m, switchLeadCmd(m.ctx, m.chat, selected)
 
 	case "/new":
 		if m.busy {
@@ -507,6 +576,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 
 func planSummary(result *planning.Result) string {
 	var b strings.Builder
+	fmt.Fprintf(&b, "lead %s (%s)\n", result.Lead.Name, result.Lead.Driver)
 	fmt.Fprintf(&b, "run %s planned\n", shortID(result.Run.ID))
 	fmt.Fprintf(&b, "integration: %s\n", result.Run.IntegrationBranch)
 	names := make([]string, 0, len(result.Agents))

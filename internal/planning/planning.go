@@ -24,6 +24,7 @@ type Options struct {
 	File       string
 	Agent      string
 	Model      string
+	Lead       *config.Agent
 	Timeout    time.Duration
 	Permission acpdriver.PermissionMode
 	AgentLogs  io.Writer
@@ -67,10 +68,14 @@ func Execute(ctx context.Context, opts Options) (*Result, error) {
 
 	fleet := cfg.Fleet()
 	var lead config.Agent
-	for _, candidate := range fleet {
-		if candidate.Role == "lead" {
-			lead = candidate
-			break
+	if opts.Lead != nil {
+		lead = *opts.Lead
+	} else {
+		for _, candidate := range fleet {
+			if candidate.Role == "lead" {
+				lead = candidate
+				break
+			}
 		}
 	}
 	if lead.Name == "" {
@@ -107,7 +112,7 @@ func Execute(ctx context.Context, opts Options) (*Result, error) {
 			return nil, fmt.Errorf("provide a goal or a plan file")
 		}
 		planCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
-		output, err := runLead(planCtx, lead, project, buildPrompt(goal, fleet, ruleSet), opts.Permission, opts.AgentLogs, opts.OnText)
+		output, err := runLead(planCtx, lead, project, buildPrompt(goal, fleet, ruleSet, lead.Name), opts.Permission, opts.AgentLogs, opts.OnText)
 		cancel()
 		if err != nil {
 			return nil, err
@@ -216,14 +221,14 @@ func Execute(ctx context.Context, opts Options) (*Result, error) {
 	return result, nil
 }
 
-func buildPrompt(goal string, fleet []config.Agent, ruleSet rules.Set) string {
+func buildPrompt(goal string, fleet []config.Agent, ruleSet rules.Set, leadName string) string {
 	var b strings.Builder
 	b.WriteString("You are the lead agent for a Switch run. Plan the work; do not implement it.\n\n")
 	b.WriteString("Goal:\n")
 	b.WriteString(goal)
 	b.WriteString("\n\nAvailable agents:\n")
 	for _, agent := range fleet {
-		if agent.Role == "lead" {
+		if agent.Name == leadName {
 			continue
 		}
 		fmt.Fprintf(&b, "- %s (role=%s, driver=%s)\n", agent.Name, agent.Role, agent.Driver)

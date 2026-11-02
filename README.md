@@ -15,7 +15,7 @@ The design is vendor-agnostic and built on the [Agent Client Protocol](https://a
 | Permission allow / deny bridge | Working (verified with Claude; interactive ask path implemented) |
 | Capability report | Working |
 | TUI chat shell | Wired to the engine with streaming, history, permissions, and resume |
-| TUI slash commands | `/plan`, `/doctor`, `/init`, `/rules`, `/session`, `/new` |
+| TUI slash commands | `/plan`, `/doctor`, `/init`, `/rules`, `/session`, `/lead`, `/new` |
 | Config, rules, SQLite state | Working (TUI `/init`, `/doctor`; auto-init on first run) |
 | Plan generation + run worktrees | Working (TUI `/plan`, lead-generated or `--file`) |
 | Task execution, scheduler, review/merge | In progress (Phase 2; planning foundation done) |
@@ -53,14 +53,19 @@ go build -o switch .
 | `/init` | Create `.switch` config and rules explicitly |
 | `/rules` | Show effective global/project rules |
 | `/session` | Show the current agent session |
+| `/lead <agent>` | Choose which fleet agent leads and persist it |
 | `/new` | Start a new agent session |
 | `/home` | Return to the dashboard |
 | `/help` | Show commands |
 | `/quit` | Exit |
 
-The dashboard is built from live state: project, agent, model, session, rules,
-fleet, latest run, task counts, commands, and keys. Slash commands operate over
-the dashboard without clearing it; `/home` returns to it after chatting.
+The TUI uses one design system across the dashboard, conversation, modals, and
+command palette: shared colors, panels, section labels, input, and status bars.
+The dashboard is built from live state: project, lead, driver, model, session,
+rules, fleet, latest run, task counts, commands, and keys. Use `/lead <agent>`
+to choose any configured fleet member as the lead; the choice persists across
+restarts. Slash commands operate over the dashboard without clearing it;
+`/home` returns to it after chatting.
 
 Type `/` to open the command palette. It filters as you type, shows
 descriptions, and supports up/down, tab completion, and enter. Anything that

@@ -104,6 +104,20 @@ func LoadOrInit(projectDir string) (Config, []string, error) {
 }
 
 // Fleet returns the configured agents, or a default lead plus two builders.
+// LeadAgent returns the configured lead, or the first fleet agent.
+func (c Config) LeadAgent() Agent {
+	fleet := c.Fleet()
+	for _, agent := range fleet {
+		if agent.Role == "lead" {
+			return agent
+		}
+	}
+	if len(fleet) > 0 {
+		return fleet[0]
+	}
+	return Agent{Name: "lead", Role: "lead", Driver: c.Agent, Model: c.Model}
+}
+
 func (c Config) Fleet() []Agent {
 	if len(c.Agents) > 0 {
 		return c.Agents
@@ -136,7 +150,7 @@ func (c *Config) normalizeFleet() error {
 		if agent.Driver == "" {
 			agent.Driver = c.Agent
 		}
-		if agent.Model == "" {
+		if agent.Model == "" && agent.Driver == c.Agent {
 			agent.Model = c.Model
 		}
 	}
@@ -171,14 +185,12 @@ model = "opencode/deepseek-v4.1-flash-free"
 [[agents]]
 name = "builder-1"
 role = "builder"
-driver = "opencode"
-model = "opencode/deepseek-v4.1-flash-free"
+driver = "claude"
 
 [[agents]]
 name = "builder-2"
 role = "builder"
-driver = "opencode"
-model = "opencode/deepseek-v4.1-flash-free"
+driver = "codex"
 `
 		if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
 			return nil, err

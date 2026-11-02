@@ -142,6 +142,39 @@ func (c *Chat) SaveAssistant(ctx context.Context, text string) error {
 	return c.Store.AppendMessage(ctx, c.Project, "assistant", text)
 }
 
+// SwitchAgent opens a fresh session for another agent and keeps the old
+// session if the new one cannot start.
+func (c *Chat) SwitchAgent(ctx context.Context, driver, model string) (Status, error) {
+	if model == "" && driver == "opencode" {
+		model = "opencode/deepseek-v4.1-flash-free"
+	}
+	session, err := acpdriver.Open(ctx, acpdriver.Spec{
+		Agent: driver,
+		Cwd:   c.Project,
+		Model: model,
+	})
+	if err != nil {
+		return Status{}, err
+	}
+
+	old := c.Session
+	c.Session = session
+	c.Agent = driver
+	c.Model = session.Model
+	if old != nil {
+		_ = old.Close(context.Background())
+	}
+	if err := c.persistSession(ctx); err != nil {
+		return Status{}, err
+	}
+	return Status{
+		Agent:     driver,
+		Model:     session.Model,
+		SessionID: session.ID,
+		Caps:      session.Caps,
+	}, nil
+}
+
 func (c *Chat) NewSession(ctx context.Context) (Status, error) {
 	_ = c.Session.Close(context.Background())
 	session, err := acpdriver.Open(ctx, acpdriver.Spec{

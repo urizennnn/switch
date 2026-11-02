@@ -564,7 +564,10 @@ Implemented:
   - persist the plan as queued tasks with mapped dependencies
   - report run, agent, and task summaries
 - TUI slash commands: `/plan`, `/doctor`, `/init`, `/rules`, `/session`,
-  `/new`, `/help`, `/quit`
+  `/lead`, `/new`, `/home`, `/help`, `/quit`
+- User-selectable lead from the configured fleet, persisted per project
+- One TUI design system shared by the dashboard, conversation, modals, input,
+  status bar, and command palette
 
 Configured fleet defaults to one lead plus two builders. Projects created by
 first run get three OpenCode agents; edit `.switch/config.toml` to mix

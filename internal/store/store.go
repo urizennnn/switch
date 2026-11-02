@@ -108,6 +108,10 @@ func (s *Store) migrate() error {
 			session_id TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS project_settings (
+			project_path TEXT PRIMARY KEY,
+			lead_agent TEXT NOT NULL DEFAULT ''
+		);`,
 		`CREATE TABLE IF NOT EXISTS chat_messages (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			project_path TEXT NOT NULL,
@@ -245,6 +249,28 @@ func (s *Store) Messages(ctx context.Context, project string, limit int) ([]Mess
 		messages[i], messages[j] = messages[j], messages[i]
 	}
 	return messages, nil
+}
+
+func (s *Store) SetLeadAgent(ctx context.Context, project, name string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO project_settings(project_path, lead_agent)
+		VALUES(?, ?)
+		ON CONFLICT(project_path) DO UPDATE SET lead_agent = excluded.lead_agent`,
+		project, name)
+	return err
+}
+
+func (s *Store) LeadAgent(ctx context.Context, project string) (string, bool, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT lead_agent FROM project_settings WHERE project_path = ?`, project).Scan(&name)
+	if err == sql.ErrNoRows || name == "" {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return name, true, nil
 }
 
 func (s *Store) CreateRun(ctx context.Context, run Run) error {

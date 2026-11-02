@@ -61,3 +61,26 @@ func TestMessagesChronological(t *testing.T) {
 		t.Fatalf("messages out of order: %#v", messages)
 	}
 }
+
+func TestLeadAgentSetting(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	if _, ok, err := store.LeadAgent(ctx, "/tmp/project"); err != nil || ok {
+		t.Fatalf("initial LeadAgent = ok %v, err %v", ok, err)
+	}
+	if err := store.SetLeadAgent(ctx, "/tmp/project", "builder-1"); err != nil {
+		t.Fatalf("SetLeadAgent: %v", err)
+	}
+	name, ok, err := store.LeadAgent(ctx, "/tmp/project")
+	if err != nil || !ok {
+		t.Fatalf("LeadAgent = ok %v, err %v", ok, err)
+	}
+	if name != "builder-1" {
+		t.Fatalf("lead = %q, want builder-1", name)
+	}
+}
