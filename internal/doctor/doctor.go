@@ -14,78 +14,89 @@ import (
 	buildversion "github.com/urizennnn/switch/internal/version"
 )
 
-// Run prints local configuration, adapter, rules, and state diagnostics.
+// Run prints local diagnostics and returns a process exit code.
 func Run(args []string) int {
 	project := "."
 	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
 		project = args[0]
 	}
-	project, err := filepath.Abs(project)
+	report, available, err := Report(project)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "doctor: %v\n", err)
 		return 1
 	}
+	fmt.Print(report)
+	if !available {
+		return 1
+	}
+	return 0
+}
 
-	fmt.Printf("switch doctor\nversion: %s\nproject: %s\n\n", buildversion.Version, project)
+// Report returns configuration, adapter, rules, and state diagnostics.
+func Report(project string) (string, bool, error) {
+	project, err := filepath.Abs(project)
+	if err != nil {
+		return "", false, err
+	}
 
 	cfg, err := config.Load(project)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "config: %v\n", err)
-		return 1
+		return "", false, fmt.Errorf("config: %w", err)
 	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "switch doctor\nversion: %s\nproject: %s\n\n", buildversion.Version, project)
+
 	projectConfig := config.ProjectConfigPath(project)
 	globalConfig := filepath.Join(config.GlobalDir(), "config.toml")
-	fmt.Printf("global config:  %s (%s)\n", globalConfig, state(globalConfig))
-	fmt.Printf("project config: %s (%s)\n", projectConfig, state(projectConfig))
-	fmt.Printf("agent:          %s\n", cfg.Agent)
+	fmt.Fprintf(&b, "global config:  %s (%s)\n", globalConfig, state(globalConfig))
+	fmt.Fprintf(&b, "project config: %s (%s)\n", projectConfig, state(projectConfig))
+	fmt.Fprintf(&b, "agent:          %s\n", cfg.Agent)
 	if cfg.Model != "" {
-		fmt.Printf("model:          %s\n", cfg.Model)
+		fmt.Fprintf(&b, "model:          %s\n", cfg.Model)
 	}
-	fmt.Printf("state:          %s\n", config.StatePath())
-	fmt.Println()
+	fmt.Fprintf(&b, "state:          %s\n\n", config.StatePath())
 
 	ruleSet, err := rules.Load(cfg.Rules)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "rules: %v\n", err)
-		return 1
+		return "", false, fmt.Errorf("rules: %w", err)
 	}
 	if ruleSet.Empty() {
-		fmt.Println("rules: none loaded")
+		b.WriteString("rules: none loaded\n")
 	} else {
 		for _, source := range ruleSet.Sources {
-			fmt.Printf("rule: %-7s %s\n", source.Scope, source.Path)
+			fmt.Fprintf(&b, "rule: %-7s %s\n", source.Scope, source.Path)
 		}
 	}
-	fmt.Println()
+	b.WriteString("\nadapters:\n")
 
-	fmt.Println("adapters:")
-	acpdriver.PrintAdapterStatuses(os.Stdout)
-	fmt.Println()
+	statuses := acpdriver.AdapterStatuses()
+	acpdriver.PrintAdapterStatuses(&b)
+	available := false
+	for _, status := range statuses {
+		if status.Name == cfg.Agent {
+			available = status.Available
+			break
+		}
+	}
+	if !available {
+		fmt.Fprintf(&b, "\nwarning: configured agent %q is not available\n", cfg.Agent)
+	}
 
 	stateStore, err := store.Open(config.StatePath())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "state: %v\n", err)
-		return 1
+		return "", available, fmt.Errorf("state: %w", err)
 	}
 	defer stateStore.Close()
 	if _, ok, err := stateStore.GetChatSession(context.Background(), project); err != nil {
-		fmt.Fprintf(os.Stderr, "state session: %v\n", err)
+		fmt.Fprintf(&b, "\nstate session: %v\n", err)
 	} else if ok {
-		fmt.Println("chat session: found")
+		b.WriteString("\nchat session: found\n")
 	} else {
-		fmt.Println("chat session: none (run `switch chat`)")
+		b.WriteString("\nchat session: none (run `switch` or `switch chat`)\n")
 	}
 
-	for _, status := range acpdriver.AdapterStatuses() {
-		if status.Name == cfg.Agent {
-			if !status.Available {
-				fmt.Fprintf(os.Stderr, "\nwarning: configured agent %q is not available\n", cfg.Agent)
-				return 1
-			}
-			return 0
-		}
-	}
-	return 0
+	return b.String(), available, nil
 }
 
 func state(path string) string {
