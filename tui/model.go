@@ -20,14 +20,16 @@ type Options struct {
 	Rules   rules.Set
 	Store   *store.Store
 	Status  chat.Status
+	Created []string
 }
 
 type model struct {
-	ctx    context.Context
-	chat   *chat.Chat
-	rules  rules.Set
-	store  *store.Store
-	status chat.Status
+	ctx     context.Context
+	chat    *chat.Chat
+	rules   rules.Set
+	store   *store.Store
+	status  chat.Status
+	created []string
 
 	input    textinput.Model
 	viewport viewport.Model
@@ -63,6 +65,7 @@ func New(opts Options) model {
 		rules:    opts.Rules,
 		store:    opts.Store,
 		status:   opts.Status,
+		created:  opts.Created,
 		input:    input,
 		viewport: viewportModel,
 		width:    80,
@@ -84,6 +87,11 @@ func (m model) Init() tea.Cmd {
 
 func (m model) initialTranscript() string {
 	var b strings.Builder
+
+	if len(m.created) > 0 {
+		b.WriteString(systemStyle.Render("initialized .switch/ config and rules"))
+		b.WriteString("\n\n")
+	}
 
 	if m.status.ResumeError != nil {
 		b.WriteString(systemStyle.Render(fmt.Sprintf("resume failed; started a new session (%v)", m.status.ResumeError)))

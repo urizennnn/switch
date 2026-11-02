@@ -37,7 +37,8 @@ The Codex and Claude adapters are Node processes. `npx` is used as a fallback; i
 # Build
 go build -o switch .
 
-# Create project config and starter rules
+# Optional: create project config and starter rules explicitly.
+# `switch` and `switch chat` also do this automatically on first run.
 ./switch init
 
 # Start the TUI (one resumable agent chat)

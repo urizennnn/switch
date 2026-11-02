@@ -50,10 +50,17 @@ func Run(args []string) int {
 		return 1
 	}
 
-	cfg, err := config.Load(project)
+	cfg, created, err := config.LoadOrInit(project)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "chat: %v\n", err)
 		return 1
+	}
+	if len(created) > 0 {
+		fmt.Printf("initialized switch in %s\n", project)
+		for _, path := range created {
+			fmt.Printf("  created %s\n", path)
+		}
+		fmt.Println()
 	}
 	if *agent == "" {
 		*agent = cfg.Agent

@@ -54,7 +54,7 @@ func runTUI() error {
 		return err
 	}
 
-	cfg, err := config.Load(project)
+	cfg, created, err := config.LoadOrInit(project)
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
@@ -93,6 +93,7 @@ func runTUI() error {
 		Rules:   ruleSet,
 		Store:   state,
 		Status:  status,
+		Created: created,
 	}))
 	_, err = program.Run()
 	return err

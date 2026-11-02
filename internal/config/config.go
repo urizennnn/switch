@@ -78,6 +78,20 @@ func decodeIfExists(path string, target any) error {
 	return err
 }
 
+// LoadOrInit creates the project config when it is missing, then loads the
+// merged configuration. This is the default path for interactive commands.
+func LoadOrInit(projectDir string) (Config, []string, error) {
+	created, err := EnsureProject(projectDir)
+	if err != nil {
+		return Config{}, nil, err
+	}
+	cfg, err := Load(projectDir)
+	if err != nil {
+		return Config{}, nil, err
+	}
+	return cfg, created, nil
+}
+
 // EnsureProject creates the project config and a starter rules file.
 func EnsureProject(projectDir string) ([]string, error) {
 	projectDir = cleanDir(projectDir)

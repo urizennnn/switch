@@ -533,7 +533,7 @@ Phase 0 exit criteria are met for OpenCode, Codex, and Claude. The next mileston
 
 Implemented:
 
-- Global/project TOML configuration with `switch init`
+- Global/project TOML configuration with `switch init` and automatic project initialization on first `switch`/`switch chat` run
 - Global, project, and project-local rule loading with prompt injection
 - SQLite-backed chat session and message state
 - Reusable ACP `Session` API with event and permission channels
