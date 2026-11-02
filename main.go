@@ -12,6 +12,7 @@ import (
 	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/doctor"
 	"github.com/urizennnn/switch/internal/initcmd"
+	"github.com/urizennnn/switch/internal/plancli"
 	"github.com/urizennnn/switch/internal/probe"
 	"github.com/urizennnn/switch/internal/rules"
 	"github.com/urizennnn/switch/internal/store"
@@ -24,6 +25,8 @@ func main() {
 		switch os.Args[1] {
 		case "chat":
 			os.Exit(chatcli.Run(os.Args[2:]))
+		case "plan":
+			os.Exit(plancli.Run(os.Args[2:]))
 		case "probe":
 			os.Exit(probe.Run(os.Args[2:]))
 		case "doctor":
@@ -106,6 +109,7 @@ Usage:
   switch                  start the TUI
   switch init [dir]       create project config and rules
   switch chat [flags]     chat with one agent (resumable)
+  switch plan [goal]      ask the lead for a plan and create a run/worktrees
   switch doctor [dir]     check config, adapters, rules, and state
   switch probe [flags]    connect to one ACP agent and stream a prompt
   switch version          print the version

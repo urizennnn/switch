@@ -11,9 +11,17 @@ import (
 
 // Agent selection and rule defaults for a project.
 type Config struct {
-	Agent string      `toml:"agent"`
-	Model string      `toml:"model"`
-	Rules RulesConfig `toml:"rules"`
+	Agent  string      `toml:"agent"`
+	Model  string      `toml:"model"`
+	Rules  RulesConfig `toml:"rules"`
+	Agents []Agent     `toml:"agents"`
+}
+
+type Agent struct {
+	Name   string `toml:"name"`
+	Role   string `toml:"role"`
+	Driver string `toml:"driver"`
+	Model  string `toml:"model"`
 }
 
 type RulesConfig struct {
@@ -60,6 +68,9 @@ func Load(projectDir string) (Config, error) {
 	if cfg.Agent == "" {
 		cfg.Agent = "opencode"
 	}
+	if err := cfg.normalizeFleet(); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 
@@ -92,6 +103,46 @@ func LoadOrInit(projectDir string) (Config, []string, error) {
 	return cfg, created, nil
 }
 
+// Fleet returns the configured agents, or a default lead plus two builders.
+func (c Config) Fleet() []Agent {
+	if len(c.Agents) > 0 {
+		return c.Agents
+	}
+	return []Agent{
+		{Name: "lead", Role: "lead", Driver: c.Agent, Model: c.Model},
+		{Name: "builder-1", Role: "builder", Driver: c.Agent, Model: c.Model},
+		{Name: "builder-2", Role: "builder", Driver: c.Agent, Model: c.Model},
+	}
+}
+
+func (c *Config) normalizeFleet() error {
+	seen := make(map[string]bool, len(c.Agents))
+	for i := range c.Agents {
+		agent := &c.Agents[i]
+		agent.Name = strings.TrimSpace(agent.Name)
+		agent.Role = strings.TrimSpace(agent.Role)
+		agent.Driver = strings.TrimSpace(agent.Driver)
+		agent.Model = strings.TrimSpace(agent.Model)
+		if agent.Name == "" {
+			return fmt.Errorf("agent %d: name is required", i+1)
+		}
+		if seen[agent.Name] {
+			return fmt.Errorf("duplicate agent name %q", agent.Name)
+		}
+		seen[agent.Name] = true
+		if agent.Role == "" {
+			agent.Role = "builder"
+		}
+		if agent.Driver == "" {
+			agent.Driver = c.Agent
+		}
+		if agent.Model == "" {
+			agent.Model = c.Model
+		}
+	}
+	return nil
+}
+
 // EnsureProject creates the project config and a starter rules file.
 func EnsureProject(projectDir string) ([]string, error) {
 	projectDir = cleanDir(projectDir)
@@ -110,6 +161,24 @@ model = "opencode/deepseek-v4.1-flash-free"
 [rules]
 # Global rules are always applied. Project rules live next to this file.
 inject = true
+
+[[agents]]
+name = "lead"
+role = "lead"
+driver = "opencode"
+model = "opencode/deepseek-v4.1-flash-free"
+
+[[agents]]
+name = "builder-1"
+role = "builder"
+driver = "opencode"
+model = "opencode/deepseek-v4.1-flash-free"
+
+[[agents]]
+name = "builder-2"
+role = "builder"
+driver = "opencode"
+model = "opencode/deepseek-v4.1-flash-free"
 `
 		if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
 			return nil, err

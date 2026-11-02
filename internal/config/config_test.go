@@ -20,6 +20,12 @@ func TestLoadOrInitCreatesProjectFiles(t *testing.T) {
 	if cfg.Agent != "opencode" {
 		t.Fatalf("agent = %q, want opencode", cfg.Agent)
 	}
+	if fleet := cfg.Fleet(); len(fleet) != 3 {
+		t.Fatalf("fleet = %#v, want 3 agents", fleet)
+	}
+	if len(cfg.Agents) != 3 {
+		t.Fatalf("configured agents = %#v, want 3", cfg.Agents)
+	}
 	if _, err := os.Stat(filepath.Join(project, ".switch", "config.toml")); err != nil {
 		t.Fatalf("project config missing: %v", err)
 	}
