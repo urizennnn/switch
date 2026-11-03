@@ -153,10 +153,13 @@ func (m model) sidebarContent(width int) string {
 		}
 		name := fmt.Sprintf("%-10s", truncate(agent.Name, 10))
 		state := "idle"
-		if active {
-			state = "active"
-		} else if task, ok := m.agentTask(agent.Name); ok {
-			state = truncate(shortTaskID(task.ID), 12)
+		switch label := m.roleLabel(agent); {
+		case label != agent.Role || active:
+			state = label // leading or standby
+		default:
+			if task, ok := m.agentTask(agent.Name); ok {
+				state = truncate(shortTaskID(task.ID), 12)
+			}
 		}
 		line := marker + " " + nameStyle.Render(name) + " " + mutedStyle.Render(state)
 		if active {
@@ -164,7 +167,13 @@ func (m model) sidebarContent(width int) string {
 		}
 		b.WriteString(line)
 		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  " + truncate(m.roleLabel(agent)+" · "+agent.Driver, width-6)))
+		// The status column already says leading/standby; only workers need
+		// their role spelled out.
+		detail := agent.Driver
+		if m.roleLabel(agent) == agent.Role {
+			detail = agent.Role + " · " + agent.Driver
+		}
+		b.WriteString(dimStyle.Render("  " + truncate(detail, width-6)))
 		b.WriteString("\n")
 	}
 

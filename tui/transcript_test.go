@@ -73,7 +73,7 @@ func TestMessageWhileConnectingIsSentOnConnect(t *testing.T) {
 func TestRoleLabel(t *testing.T) {
 	m := model{lead: config.Agent{Name: "builder-1", Role: "builder"}}
 	for agent, want := range map[config.Agent]string{
-		{Name: "builder-1", Role: "builder"}: "lead",
+		{Name: "builder-1", Role: "builder"}: "leading",
 		{Name: "lead", Role: "lead"}:         "standby",
 		{Name: "builder-2", Role: "builder"}: "builder",
 	} {

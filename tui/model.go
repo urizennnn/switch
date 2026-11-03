@@ -202,12 +202,13 @@ func (m model) dashboardFleet() []config.Agent {
 	return []config.Agent{m.lead}
 }
 
-// roleLabel is the role shown for an agent: whichever agent leads is "lead",
-// and an agent configured as lead that is not leading now is "standby".
+// roleLabel is the role shown for an agent: whichever agent leads is
+// "leading", and an agent configured as lead that is not leading now is
+// "standby". It avoids the word "lead", which is often an agent's name.
 func (m model) roleLabel(agent config.Agent) string {
 	switch {
 	case agent.Name == m.lead.Name:
-		return "lead"
+		return "leading"
 	case agent.Role == "lead":
 		return "standby"
 	default:
