@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -9,31 +10,42 @@ import (
 // Design tokens. Every view uses these values so the product keeps one visual
 // language for its whole lifetime.
 var (
-	accent     = lipgloss.Color("#ff7849")
-	teal       = lipgloss.Color("#5fc5b0")
-	text       = lipgloss.Color("#e6e4dd")
-	muted      = lipgloss.Color("#8b8f9a")
-	dim        = lipgloss.Color("#555964")
-	border     = lipgloss.Color("#3a3f4b")
-	red        = lipgloss.Color("#e05d5d")
-	surface    = lipgloss.Color("#20242c")
-	surfaceAlt = lipgloss.Color("#2a2f3a")
+	accent     = lipgloss.Color("#ff6b3d")
+	teal       = lipgloss.Color("#3ee0c0")
+	text       = lipgloss.Color("#f4f2ec")
+	muted      = lipgloss.Color("#b7bdc9")
+	dim        = lipgloss.Color("#7d8797")
+	border     = lipgloss.Color("#4b5363")
+	red        = lipgloss.Color("#ff5f6d")
+	green      = lipgloss.Color("#48e08f")
+	yellow     = lipgloss.Color("#f5c451")
+	surface    = lipgloss.Color("#171b22")
+	surfaceAlt = lipgloss.Color("#303847")
 )
 
 var (
-	brandStyle  = lipgloss.NewStyle().Foreground(accent).Bold(true)
-	titleStyle  = lipgloss.NewStyle().Foreground(teal).Bold(true)
-	labelStyle  = lipgloss.NewStyle().Foreground(accent).Bold(true)
-	agentStyle  = lipgloss.NewStyle().Foreground(teal).Bold(true)
-	textStyle   = lipgloss.NewStyle().Foreground(text)
-	mutedStyle  = lipgloss.NewStyle().Foreground(muted)
-	dimStyle    = lipgloss.NewStyle().Foreground(dim)
-	errorStyle  = lipgloss.NewStyle().Foreground(red)
-	systemStyle = lipgloss.NewStyle().Foreground(dim).Italic(true)
+	brandStyle        = lipgloss.NewStyle().Foreground(accent).Bold(true)
+	titleStyle        = lipgloss.NewStyle().Foreground(teal).Bold(true)
+	labelStyle        = lipgloss.NewStyle().Foreground(accent).Bold(true)
+	agentStyle        = lipgloss.NewStyle().Foreground(teal).Bold(true)
+	userMarkerStyle   = lipgloss.NewStyle().Foreground(muted)
+	switchMarkerStyle = lipgloss.NewStyle().Foreground(dim)
+	textStyle         = lipgloss.NewStyle().Foreground(text)
+	mutedStyle        = lipgloss.NewStyle().Foreground(muted)
+	dimStyle          = lipgloss.NewStyle().Foreground(dim)
+	errorStyle        = lipgloss.NewStyle().Foreground(red).Bold(true)
+	successStyle      = lipgloss.NewStyle().Foreground(green).Bold(true)
+	warningStyle      = lipgloss.NewStyle().Foreground(yellow).Bold(true)
+	systemStyle       = lipgloss.NewStyle().Foreground(dim).Italic(true)
 
 	selectedStyle = lipgloss.NewStyle().
 			Background(surfaceAlt).
 			Foreground(text).
+			Bold(true)
+
+	activeStyle = lipgloss.NewStyle().
+			Background(accent).
+			Foreground(surface).
 			Bold(true)
 
 	panelStyle = lipgloss.NewStyle().
@@ -58,7 +70,11 @@ func section(title string) string {
 }
 
 func keyValue(key, value string) string {
-	return dimStyle.Render(key) + "  " + mutedStyle.Render(value)
+	return mutedStyle.Render(key) + "  " + textStyle.Render(value)
+}
+
+func commandRow(label, description string) string {
+	return labelStyle.Render(fmt.Sprintf("%-26s", label)) + " " + mutedStyle.Render(description)
 }
 
 func panel(width, height int, title, content string) string {
@@ -85,7 +101,7 @@ func appHeader(width int, left, right string) string {
 func inputBar(width int, value string) string {
 	return inputStyle.
 		Width(max(10, width-2)).
-		Render(dimStyle.Render("› ") + value)
+		Render(brandStyle.Render("› ") + textStyle.Render(value))
 }
 
 func statusBar(width int, left, right string) string {
@@ -93,16 +109,29 @@ func statusBar(width int, left, right string) string {
 	leftWidth := max(10, width-rightWidth-spaceM)
 	return lipgloss.JoinHorizontal(
 		lipgloss.Top,
-		dimStyle.Width(leftWidth).Render(left),
+		mutedStyle.Width(leftWidth).Render(left),
 		dimStyle.Width(rightWidth).Align(lipgloss.Right).Render(right),
 	)
+}
+
+func modalPanel(width int, title, content, footer string) string {
+	body := content
+	if footer != "" {
+		body += "\n\n" + dimStyle.Render(footer)
+	}
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accent).
+		Background(surface).
+		Padding(1, 2).
+		Width(max(30, width)).
+		Render(titleStyle.Render(strings.ToUpper(title)) + "\n\n" + body)
 }
 
 func palettePanel(width int, content string) string {
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(accent).
-		Background(surface).
 		Padding(0, 1).
 		Width(max(20, width-2)).
 		Render(content)
@@ -117,6 +146,18 @@ func truncate(value string, limit int) string {
 		return value
 	}
 	return string(runes[:limit-1]) + "…"
+}
+
+func tailLines(value string, limit int) string {
+	value = strings.TrimRight(value, "\n")
+	if limit < 1 {
+		return value
+	}
+	lines := strings.Split(value, "\n")
+	if len(lines) <= limit {
+		return value
+	}
+	return "…\n" + strings.Join(lines[len(lines)-limit+1:], "\n")
 }
 
 func truncateLines(value string, limit int) string {

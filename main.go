@@ -7,7 +7,6 @@ import (
 	"os"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/urizennnn/switch/internal/chat"
 	"github.com/urizennnn/switch/internal/chatcli"
 	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/doctor"
@@ -87,56 +86,44 @@ func runTUI() error {
 	defer state.Close()
 
 	ctx := context.Background()
-	lead := cfg.LeadAgent()
-	if name, ok, _ := state.LeadAgent(ctx, project); ok {
-		for _, agent := range cfg.Fleet() {
-			if agent.Name == name {
-				lead = agent
-				break
-			}
-		}
-	} else if stored, ok, _ := state.GetChatSession(ctx, project); ok {
-		for _, agent := range cfg.Fleet() {
-			if agent.Driver == stored.Agent {
-				lead = agent
-				if stored.Model != "" {
-					lead.Model = stored.Model
-				}
-				break
-			}
-		}
-	}
-
-	conversation, status, err := chat.Open(ctx, chat.Options{
-		Project: project,
-		Agent:   lead.Driver,
-		Model:   lead.Model,
-		Rules:   ruleSet,
-		Store:   state,
-	})
-	if err != nil {
-		return fmt.Errorf("chat: %w", err)
-	}
-	defer conversation.Close(context.Background())
-
-	f, err := tea.LogToFile("debug.log", "debug")
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+	lead := resolveLead(ctx, cfg, state, project)
 
 	program := tea.NewProgram(tui.New(tui.Options{
 		Context: ctx,
-		Chat:    conversation,
+		Project: project,
 		Rules:   ruleSet,
 		Store:   state,
-		Status:  status,
 		Created: created,
 		Fleet:   cfg.Fleet(),
 		Lead:    lead,
 	}))
 	_, err = program.Run()
 	return err
+}
+
+// resolveLead picks the lead from configured agents only: the stored lead
+// name, then the agent that owns the stored chat session, then the config
+// default. Names that are not configured agents, such as bare adapter names
+// stored by older builds, are ignored.
+func resolveLead(ctx context.Context, cfg config.Config, state *store.Store, project string) config.Agent {
+	if name, ok, _ := state.LeadAgent(ctx, project); ok {
+		for _, agent := range cfg.Fleet() {
+			if agent.Name == name {
+				return agent
+			}
+		}
+	}
+	if stored, ok, _ := state.GetChatSession(ctx, project); ok {
+		for _, agent := range cfg.Fleet() {
+			if agent.Driver == stored.Agent {
+				if stored.Model != "" {
+					agent.Model = stored.Model
+				}
+				return agent
+			}
+		}
+	}
+	return cfg.LeadAgent()
 }
 
 func usage() {
@@ -150,11 +137,13 @@ Usage:
 Inside the TUI, type / to open the command palette:
   /plan <goal>            ask the lead to plan and create a run
   /plan --file <path>     import a plan JSON file
+  /run                    dispatch the next ready task to a worker
   /doctor                 check config, rules, adapters, and state
   /init                   create .switch config and rules
   /rules                  show effective rules
   /session                show the current agent session
-  /lead <agent>           choose which fleet agent leads
+  /lead <agent>           choose which configured agent leads
+  /adapters               install or uninstall ACP adapters
   /new                    start a new agent session
   /quit                   exit
 `)

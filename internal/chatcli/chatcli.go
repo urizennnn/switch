@@ -164,11 +164,12 @@ Anything else is sent to the agent.`)
 	case "/session":
 		fmt.Printf("agent:   %s\nmodel:   %s\nsession: %s\n", conversation.Agent, conversation.Model, conversation.Session.ID)
 	case "/new":
-		status, err := conversation.NewSession(ctx)
+		next, status, err := conversation.NewSession(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "chat: new session: %v\n", err)
 			return commandContinue
 		}
+		*conversation = *next
 		fmt.Printf("session: %s (new)\n", status.SessionID)
 	default:
 		fmt.Printf("unknown command %s (try /help)\n", command)

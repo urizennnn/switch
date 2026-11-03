@@ -14,7 +14,7 @@ Scope: v1 — git repositories, one lead + N workers, OpenCode / Codex / Claude 
 | Lead behavior | Plan and review only; does not implement |
 | First vendors | OpenCode, Codex, Claude Code |
 | Lead | Exactly one per run; the only agent the user converses with |
-| Isolation | One git worktree per agent/task |
+| Isolation | One git worktree per run agent; an agent's tasks run serially in it |
 | Integration | Serialized merge queue into a run integration branch |
 | Rules | Global, project, project-local, role, task scopes |
 | Language | Go 1.26.2+ (Go 1.27 toolchain used locally) |
@@ -137,14 +137,16 @@ This is the product's actual value. The ACP boilerplate is now a dependency, not
 5. **Keep an escape hatch**: the `Driver` interface means a raw protocol client, `acpx`, or a TS sidecar can replace the ACP driver without touching orchestration.
 6. **Track ACP v1** now. ACP v2 is still draft; negotiate v1 and revisit when stable.
 
-### Adapter installation (deferred)
+### Adapter installation
 
 Adapters are external executables or npm packages, so installation is a security
-boundary. V1 does not install anything automatically and does not run installers
-inside a run. `switch __control probe --list` only reports what is present and prints
-remediation hints.
+boundary. Switch never installs anything automatically or inside a run.
+`switch __control probe --list` reports what is present and prints remediation
+hints.
 
-A later `/doctor` / first-run flow will offer an explicit installation UI:
+The TUI `/adapters` modal installs or uninstalls npm-managed adapters (Codex,
+Claude, OpenClaw) with `npm install -g` at a pinned version (OpenClaw tracks `latest`), after a second
+confirming enter. OpenCode is managed externally. Still to do:
 
 - show the exact command, package, pinned version, source URL, and install scope
 - require one confirmation per package, with a visible "do not install" default
@@ -239,7 +241,7 @@ internal/worktree/              git worktree and merge operations
 internal/rules/                 discovery, frontmatter, compiler
 internal/store/                 SQLite migrations and queries
 internal/control/               Unix socket, CLI handlers, MCP bridge
-internal/tui/                   app shell, chat, fleet, board, diff, logs
+internal/tui/                   app shell, chat, agents, board, diff, logs
 internal/verify/                command runner and evidence capture
 internal/config/                TOML load/merge/validation
 internal/doctor/
@@ -565,18 +567,37 @@ Implemented:
   - report run, agent, and task summaries
 - TUI slash commands: `/plan`, `/doctor`, `/init`, `/rules`, `/session`,
   `/lead`, `/new`, `/home`, `/help`, `/quit`
-- User-selectable lead from the configured fleet, persisted per project
+- User-selectable lead from the configured agents, persisted per project
 - One TUI design system shared by the dashboard, conversation, modals, input,
   status bar, and command palette
 
-Configured fleet defaults to one lead plus two builders. Projects created by
+Configured agents default to one lead plus two builders. Projects created by
 first run get three OpenCode agents; edit `.switch/config.toml` to mix
 drivers/models.
 
 Not yet implemented:
 
-- Dispatching queued tasks to workers
-- Task worktrees and assignment/branch lifecycle
+- Scheduler, concurrency, and retries (one task per `/run` today)
 - Verification runner, lead review, and merge queue
 - Control socket, agent-facing CLI, and MCP bridge
-- Fleet/task TUI views
+- Agent/task TUI views
+
+### Single-task execution (2026-11-03)
+
+`internal/execution` and TUI `/run` dispatch one task end to end:
+
+- `Next` picks the first `queued` or `interrupted` task, in plan order, whose
+  dependencies are `done`/`approved`/`merged` and whose role has a worker
+  with no running task. The lead never receives tasks.
+- **Worktree model:** each run agent keeps the single worktree created by
+  `/plan`; tasks for the same agent are serialized. Per-task worktrees can
+  come later if parallelism within one agent is needed.
+- The worker prompt carries the brief, file scope, acceptance criteria,
+  verification commands, effective rules, and "do not commit, push, or merge".
+- The worker session resumes from `run_agents.session_id` when possible.
+- Task states: `queued → running → implemented | failed | interrupted`.
+  `implemented` waits for the verification runner (Milestone C).
+- Esc cancels the worker and marks the task `interrupted`; the adapter is
+  reaped. Tasks left `running` by a crash become `interrupted` on the next
+  `/run`.
+- Worker permission requests use the same TUI modal as the chat lead.

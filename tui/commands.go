@@ -15,11 +15,13 @@ type slashCommand struct {
 var slashCommands = []slashCommand{
 	{Name: "/plan", Args: "<goal>", Description: "plan a run", NeedsArg: true},
 	{Name: "/plan --file", Args: "<path>", Description: "import plan JSON", NeedsArg: true},
+	{Name: "/run", Description: "run the next ready task"},
 	{Name: "/doctor", Description: "check setup"},
 	{Name: "/init", Description: "create config"},
 	{Name: "/rules", Description: "show rules"},
 	{Name: "/session", Description: "show session"},
 	{Name: "/lead", Args: "<agent>", Description: "choose the lead", NeedsArg: true},
+	{Name: "/adapters", Description: "manage ACP adapters"},
 	{Name: "/new", Description: "new session"},
 	{Name: "/home", Description: "dashboard"},
 	{Name: "/help", Description: "show help"},

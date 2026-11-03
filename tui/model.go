@@ -17,24 +17,26 @@ import (
 
 type Options struct {
 	Context context.Context
-	Chat    *chat.Chat
+	Project string
 	Rules   rules.Set
 	Store   *store.Store
-	Status  chat.Status
 	Created []string
 	Fleet   []config.Agent
 	Lead    config.Agent
 }
 
 type model struct {
-	ctx     context.Context
-	chat    *chat.Chat
-	rules   rules.Set
-	store   *store.Store
-	status  chat.Status
-	created []string
-	fleet   []config.Agent
-	lead    config.Agent
+	ctx          context.Context
+	cancel       context.CancelFunc
+	project      string
+	chat         *chat.Chat
+	rules        rules.Set
+	store        *store.Store
+	status       chat.Status
+	created      []string
+	fleet        []config.Agent
+	lead         config.Agent
+	previousLead config.Agent
 
 	input    textinput.Model
 	viewport viewport.Model
@@ -50,18 +52,29 @@ type model struct {
 	permission    *acpdriver.PermissionRequest
 	err           error
 
-	home         bool
-	modalTitle   string
-	modal        string
-	run          *store.Run
-	tasks        []store.Task
-	runAgents    []store.RunAgent
-	palette      []slashCommand
-	paletteIndex int
-	paletteOpen  bool
+	connecting       bool
+	connectErr       error
+	home             bool
+	modalTitle       string
+	modal            string
+	job              string
+	jobCancel        context.CancelFunc
+	jobStream        chan string
+	jobPermissions   chan *acpdriver.PermissionRequest
+	jobBuffer        strings.Builder
+	permissionResume tea.Cmd
+	picker           *leadPicker
+	adapterPicker    *adapterPicker
+	run              *store.Run
+	tasks            []store.Task
+	runAgents        []store.RunAgent
+	palette          []slashCommand
+	paletteIndex     int
+	paletteOpen      bool
 }
 
 func New(opts Options) model {
+	ctx, cancel := context.WithCancel(opts.Context)
 	input := textinput.New()
 	input.Placeholder = "State your wish"
 	input.Prompt = ""
@@ -76,42 +89,35 @@ func New(opts Options) model {
 	viewportModel.SoftWrap = true
 
 	m := model{
-		ctx:      opts.Context,
-		chat:     opts.Chat,
-		rules:    opts.Rules,
-		store:    opts.Store,
-		status:   opts.Status,
-		created:  opts.Created,
-		fleet:    opts.Fleet,
-		lead:     opts.Lead,
-		input:    input,
-		viewport: viewportModel,
-		width:    80,
-		height:   24,
-		state:    "ready",
-		home:     true,
+		ctx:        ctx,
+		cancel:     cancel,
+		project:    opts.Project,
+		rules:      opts.Rules,
+		store:      opts.Store,
+		created:    opts.Created,
+		fleet:      opts.Fleet,
+		lead:       opts.Lead,
+		input:      input,
+		viewport:   viewportModel,
+		width:      80,
+		height:     24,
+		state:      "connecting",
+		connecting: true,
 	}
-
-	if m.lead.Name == "" {
-		m.lead = config.Agent{Name: m.chat.Agent, Role: "lead", Driver: m.chat.Agent, Model: m.chat.Model}
-	}
-
-	m.transcript = m.initialTranscript()
-	m.refreshViewport()
-	m.refreshDashboard()
 	m.layout()
 	return m
 }
 
+// Init renders the shell immediately and connects the lead in the background.
 func (m model) Init() tea.Cmd {
-	return tea.Batch(
-		textinput.Blink,
-		waitForActivity(m.chat.Session, m.gen),
-	)
+	return tea.Batch(textinput.Blink, m.connectCmd())
 }
 
 func (m model) initialTranscript() string {
 	var b strings.Builder
+	if m.chat == nil {
+		return ""
+	}
 
 	if len(m.created) > 0 {
 		b.WriteString(systemStyle.Render("initialized .switch/ config and rules"))
@@ -128,12 +134,12 @@ func (m model) initialTranscript() string {
 		for _, message := range messages {
 			switch message.Role {
 			case "user":
-				b.WriteString(labelStyle.Render("you"))
+				b.WriteString(userMarkerStyle.Render("you"))
 				b.WriteString("  ")
 				b.WriteString(textStyle.Render(message.Content))
 				b.WriteString("\n\n")
 			case "assistant":
-				b.WriteString(agentStyle.Render("switch"))
+				b.WriteString(switchMarkerStyle.Render("switch"))
 				b.WriteString("  ")
 				b.WriteString(textStyle.Render(message.Content))
 				b.WriteString("\n\n")
@@ -153,7 +159,7 @@ func (m *model) appendUser(text string) {
 		m.transcript += "\n\n"
 		m.assistantOpen = false
 	}
-	m.transcript += labelStyle.Render("you") + "  " + textStyle.Render(text) + "\n\n"
+	m.transcript += userMarkerStyle.Render("you") + "  " + textStyle.Render(text) + "\n\n"
 }
 
 func (m *model) appendAssistantChunk(text string) {
@@ -164,7 +170,7 @@ func (m *model) appendAssistantChunk(text string) {
 		if m.transcript != "" && !strings.HasSuffix(m.transcript, "\n\n") {
 			m.transcript += "\n\n"
 		}
-		m.transcript += agentStyle.Render("switch") + "  "
+		m.transcript += switchMarkerStyle.Render("switch") + "  "
 		m.assistantOpen = true
 	}
 	m.transcript += textStyle.Render(text)
@@ -232,22 +238,64 @@ func (m model) dashboardFleet() []config.Agent {
 	if len(m.fleet) > 0 {
 		return m.fleet
 	}
-	if m.chat == nil {
-		return nil
+	return []config.Agent{m.lead}
+}
+
+// fleetAgent finds a configured agent by name. Bare adapter names are not
+// agents and never match.
+func (m model) fleetAgent(name string) (config.Agent, bool) {
+	for _, agent := range m.dashboardFleet() {
+		if agent.Name == name {
+			return agent, true
+		}
 	}
-	return []config.Agent{{Name: "lead", Role: "lead", Driver: m.chat.Agent, Model: m.chat.Model}}
+	return config.Agent{}, false
 }
 
 func (m model) taskCounts() (queued, running, done int) {
 	for _, task := range m.tasks {
 		switch task.Status {
-		case "queued":
+		case "queued", "interrupted":
 			queued++
-		case "running", "assigned", "verifying", "review":
+		case "running", "assigned", "implemented", "verifying", "review":
 			running++
 		case "done", "merged", "approved":
 			done++
 		}
 	}
 	return queued, running, done
+}
+
+type connectedMsg struct {
+	chat   *chat.Chat
+	status chat.Status
+	err    error
+}
+
+func (m model) connectCmd() tea.Cmd {
+	return func() tea.Msg {
+		conversation, status, err := chat.Open(m.ctx, chat.Options{
+			Project: m.project,
+			Agent:   m.lead.Driver,
+			Model:   m.lead.Model,
+			Rules:   m.rules,
+			Store:   m.store,
+		})
+		return connectedMsg{chat: conversation, status: status, err: err}
+	}
+}
+
+func (m *model) shutdown() {
+	// Save the visible lead on the way out too. This covers quitting while a
+	// switch is still connecting, before leadChangedMsg can persist it.
+	if m.lead.Name != "" {
+		_ = m.persistLead(m.lead.Name)
+	}
+	m.stopJob()
+	if m.cancel != nil {
+		m.cancel()
+	}
+	if m.chat != nil {
+		_ = m.chat.Close(context.Background())
+	}
 }

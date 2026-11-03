@@ -2,7 +2,7 @@
 
 > **⚠️ Early development — Phase 2 planning foundation complete.**
 
-Switch is a terminal orchestrator for a fleet of existing coding agents. It does not call models itself. It launches vendor CLIs as subprocesses, gives each one a role and an isolated workspace, and lets exactly one agent — the lead — plan, delegate, review, and talk to you. You converse only with the lead.
+Switch is a terminal orchestrator for a team of existing coding agents. It does not call models itself. It launches vendor CLIs as subprocesses, gives each one a role and an isolated workspace, and lets exactly one agent — the lead — plan, delegate, review, and talk to you. You converse only with the lead.
 
 The design is vendor-agnostic and built on the [Agent Client Protocol](https://agentclientprotocol.com). OpenCode, Codex, Claude Code, and OpenClaw are first-class targets; any future ACP agent can be added as a configuration entry.
 
@@ -15,10 +15,11 @@ The design is vendor-agnostic and built on the [Agent Client Protocol](https://a
 | Permission allow / deny bridge | Working (verified with Claude; interactive ask path implemented) |
 | Capability report | Working |
 | TUI chat shell | Wired to the engine with streaming, history, permissions, and resume |
-| TUI slash commands | `/plan`, `/doctor`, `/init`, `/rules`, `/session`, `/lead`, `/new` |
+| TUI slash commands | `/plan`, `/run`, `/doctor`, `/init`, `/rules`, `/session`, `/lead`, `/adapters`, `/new` |
 | Config, rules, SQLite state | Working (TUI `/init`, `/doctor`; auto-init on first run) |
 | Plan generation + run worktrees | Working (TUI `/plan`, lead-generated or `--file`) |
-| Task execution, scheduler, review/merge | In progress (Phase 2; planning foundation done) |
+| Single-task execution | Working (TUI `/run` dispatches the next ready task to a worker) |
+| Scheduler, verification, review/merge | Not started (Phase 2) |
 
 See [`docs/architecture.md`](docs/architecture.md) for the full architecture, language choice, phases, and risks.
 
@@ -49,11 +50,13 @@ go build -o switch .
 |---|---|
 | `/plan <goal>` | Ask the lead to plan and create a run with worktrees |
 | `/plan --file <path>` | Import a plan JSON file |
+| `/run` | Dispatch the next ready task to an idle worker; esc cancels, `/run` again resumes |
 | `/doctor` | Check config, rules, adapters, and state |
 | `/init` | Create `.switch` config and rules explicitly |
 | `/rules` | Show effective global/project rules |
 | `/session` | Show the current agent session |
-| `/lead <agent>` | Choose which fleet agent leads and persist it |
+| `/lead <agent>` | Choose which configured agent leads and persist it |
+| `/adapters` | Install or uninstall ACP adapters |
 | `/new` | Start a new agent session |
 | `/home` | Return to the dashboard |
 | `/help` | Show commands |
@@ -62,8 +65,8 @@ go build -o switch .
 The TUI uses one design system across the dashboard, conversation, modals, and
 command palette: shared colors, panels, section labels, input, and status bars.
 The dashboard is built from live state: project, lead, driver, model, session,
-rules, fleet, latest run, task counts, commands, and keys. Use `/lead <agent>`
-to choose any configured fleet member as the lead; the choice persists across
+rules, configured agents, latest run, task counts, commands, and keys. Use
+`/lead <agent>` to choose any configured agent as the lead; the choice persists across
 restarts. Slash commands operate over the dashboard without clearing it;
 `/home` returns to it after chatting.
 
@@ -133,7 +136,7 @@ Switch runs a modular Go monolith. The engine owns runs, tasks, agents, rules, w
 
 1. **Phase 0 — ACP spine** *(done)*: probe OpenCode, Codex, Claude; capability matrix; permissions; resume.
 2. **Phase 1 — Engine + chat shell** *(done)*: config, SQLite state, session manager, TUI chat, `/rules`, doctor.
-3. **Phase 2 — Lead + workers**: plan schema, control socket/CLI/MCP bridge, scheduler, worktrees, fleet view.
+3. **Phase 2 — Lead + workers**: plan schema, control socket/CLI/MCP bridge, scheduler, worktrees, agent view.
 4. **Phase 3 — Review + integration**: verification, diff review, merge queue, retries, budgets.
 5. **Phase 4 — Rules + context**: global/project/role rules, effective-rules view, product context docs.
 6. **Phase 5 — OpenClaw + ecosystem**: ACP bridge, adapter install/doctor, capability fallbacks.
@@ -156,14 +159,14 @@ The probe implementation lives in:
 - `internal/plan/` — plan schema and DAG validation
 - `internal/worktree/` — git worktree creation and cleanup
 - `internal/plancli/` — internal `plan` command; the TUI calls `internal/planning` directly
+- `internal/execution/` — dispatches one ready task to a worker in its agent worktree
 
 The `tui/` package is wired to the chat engine. `switch` opens the TUI; the hidden `__control` commands use the same engine for automation.
 
 ## Known limitations
 
 - The TUI supports one resumable agent chat.
-- `/plan` creates a run, agent worktrees, and persisted tasks; task execution and review are the next Phase 2 step.
-- Task execution currently stops after planning; no worker has been dispatched yet.
+- `/run` executes one task per invocation; there is no scheduler, concurrency, or verification yet. Finished tasks stop at `implemented` until the verification runner exists, so their dependents stay blocked.
 - OpenClaw is untested because it is not installed on this machine.
 - OpenCode's default model may hit provider privacy settings; use `--model` to choose a permitted model.
 - Claude adapter hooks/plugins can add stderr noise; use `--agent-logs` only when debugging.

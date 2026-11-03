@@ -142,9 +142,11 @@ func (c *Chat) SaveAssistant(ctx context.Context, text string) error {
 	return c.Store.AppendMessage(ctx, c.Project, "assistant", text)
 }
 
-// SwitchAgent opens a fresh session for another agent and keeps the old
-// session if the new one cannot start.
-func (c *Chat) SwitchAgent(ctx context.Context, driver, model string) (Status, error) {
+// SwitchAgent opens a fresh session for another agent and returns a new Chat
+// bound to it. The receiver is left untouched so callers on another goroutine
+// can keep reading it; the old session is closed only once the new one is
+// ready and persisted.
+func (c *Chat) SwitchAgent(ctx context.Context, driver, model string) (*Chat, Status, error) {
 	if model == "" && driver == "opencode" {
 		model = "opencode/deepseek-v4.1-flash-free"
 	}
@@ -154,20 +156,21 @@ func (c *Chat) SwitchAgent(ctx context.Context, driver, model string) (Status, e
 		Model: model,
 	})
 	if err != nil {
-		return Status{}, err
+		return nil, Status{}, err
 	}
 
-	old := c.Session
-	c.Session = session
-	c.Agent = driver
-	c.Model = session.Model
-	if old != nil {
-		_ = old.Close(context.Background())
+	next := *c
+	next.Session = session
+	next.Agent = driver
+	next.Model = session.Model
+	if err := next.persistSession(ctx); err != nil {
+		_ = session.Close(context.Background())
+		return nil, Status{}, err
 	}
-	if err := c.persistSession(ctx); err != nil {
-		return Status{}, err
+	if c.Session != nil {
+		_ = c.Session.Close(context.Background())
 	}
-	return Status{
+	return &next, Status{
 		Agent:     driver,
 		Model:     session.Model,
 		SessionID: session.ID,
@@ -175,27 +178,9 @@ func (c *Chat) SwitchAgent(ctx context.Context, driver, model string) (Status, e
 	}, nil
 }
 
-func (c *Chat) NewSession(ctx context.Context) (Status, error) {
-	_ = c.Session.Close(context.Background())
-	session, err := acpdriver.Open(ctx, acpdriver.Spec{
-		Agent: c.Agent,
-		Cwd:   c.Project,
-		Model: c.Model,
-	})
-	if err != nil {
-		return Status{}, err
-	}
-	c.Session = session
-	c.Model = session.Model
-	if err := c.persistSession(ctx); err != nil {
-		return Status{}, err
-	}
-	return Status{
-		Agent:     c.Agent,
-		Model:     session.Model,
-		SessionID: session.ID,
-		Caps:      session.Caps,
-	}, nil
+// NewSession replaces the current session with a fresh one for the same agent.
+func (c *Chat) NewSession(ctx context.Context) (*Chat, Status, error) {
+	return c.SwitchAgent(ctx, c.Agent, c.Model)
 }
 
 func (c *Chat) Close(ctx context.Context) error {
