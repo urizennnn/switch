@@ -52,7 +52,6 @@ type RunAgent struct {
 	Branch    string
 	SessionID string
 	Status    string
-	Token     string // control-plane credential for this run
 	CreatedAt time.Time
 }
 
@@ -327,8 +326,8 @@ func (s *Store) LatestRun(ctx context.Context, project string) (Run, bool, error
 
 func (s *Store) SaveRunAgent(ctx context.Context, agent RunAgent) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO run_agents(id, run_id, name, role, driver, model, worktree, branch, session_id, status, token, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO run_agents(id, run_id, name, role, driver, model, worktree, branch, session_id, status, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			role = excluded.role,
@@ -337,17 +336,16 @@ func (s *Store) SaveRunAgent(ctx context.Context, agent RunAgent) error {
 			worktree = excluded.worktree,
 			branch = excluded.branch,
 			session_id = excluded.session_id,
-			status = excluded.status,
-			token = excluded.token`,
+			status = excluded.status`,
 		agent.ID, agent.RunID, agent.Name, agent.Role, agent.Driver, agent.Model,
-		agent.Worktree, agent.Branch, agent.SessionID, agent.Status, agent.Token,
+		agent.Worktree, agent.Branch, agent.SessionID, agent.Status,
 		time.Now().UTC().Format(time.RFC3339))
 	return err
 }
 
 func (s *Store) RunAgents(ctx context.Context, runID string) ([]RunAgent, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, run_id, name, role, driver, model, worktree, branch, session_id, status, token, created_at
+		SELECT id, run_id, name, role, driver, model, worktree, branch, session_id, status, created_at
 		FROM run_agents WHERE run_id = ? ORDER BY rowid`, runID)
 	if err != nil {
 		return nil, err
@@ -359,7 +357,7 @@ func (s *Store) RunAgents(ctx context.Context, runID string) ([]RunAgent, error)
 		var agent RunAgent
 		var created string
 		if err := rows.Scan(&agent.ID, &agent.RunID, &agent.Name, &agent.Role, &agent.Driver,
-			&agent.Model, &agent.Worktree, &agent.Branch, &agent.SessionID, &agent.Status, &agent.Token, &created); err != nil {
+			&agent.Model, &agent.Worktree, &agent.Branch, &agent.SessionID, &agent.Status, &created); err != nil {
 			return nil, err
 		}
 		agent.CreatedAt, _ = time.Parse(time.RFC3339, created)

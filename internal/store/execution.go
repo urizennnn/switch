@@ -80,7 +80,6 @@ var executionTables = []string{
 // executionColumns are added to tables created by older builds.
 var executionColumns = []struct{ table, column, def string }{
 	{"runs", "integration_path", "TEXT NOT NULL DEFAULT ''"},
-	{"run_agents", "token", "TEXT NOT NULL DEFAULT ''"},
 	{"tasks", "session_id", "TEXT NOT NULL DEFAULT ''"},
 	{"tasks", "commit_sha", "TEXT NOT NULL DEFAULT ''"},
 	{"tasks", "feedback", "TEXT NOT NULL DEFAULT ''"},

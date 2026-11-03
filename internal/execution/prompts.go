@@ -25,7 +25,8 @@ func WorkerPrompt(task store.Task, agent store.RunAgent, ruleSet rules.Set) stri
 	}
 	writeRules(&b, ruleSet)
 	b.WriteString("\nDo not commit, push, merge, or switch branches; Switch commits and integrates approved work.\n")
-	b.WriteString("If the task cannot be done, say why and call the switch_block tool if it is available.\n")
+	b.WriteString("Report through the switch MCP tools (switch_progress, switch_complete, switch_block) if they are available,\n")
+	b.WriteString("or with `$SWITCH_BIN __control agent progress|complete|block <message>`. If the task cannot be done, block it and say why.\n")
 	b.WriteString("When you are done, reply with a short summary of what you changed and anything left open.\n")
 	return b.String()
 }

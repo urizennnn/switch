@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/urizennnn/switch/internal/config"
+	"github.com/urizennnn/switch/internal/control"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/execution"
 	"github.com/urizennnn/switch/internal/planning"
@@ -178,13 +179,16 @@ func startPlanCmd(ctx context.Context, project, goal, file string, lead config.A
 
 // newEngine builds an engine for the current run, wired to the job channels
 // when a run job is active.
-func (m model) newEngine(ctx context.Context) (*execution.Engine, error) {
+func (m model) newEngine(ctx context.Context, server *control.Server) (*execution.Engine, error) {
 	opts := execution.Options{
 		Store:         m.store,
 		RunID:         m.run.ID,
 		Rules:         m.rules,
 		Config:        m.runConfig,
 		WaitForReview: true,
+	}
+	if server != nil {
+		opts.Control = server
 	}
 	if stream, permissions, changes := m.jobStream, m.jobPermissions, m.jobChanges; stream != nil {
 		opts.OnText = func(agent, text string) { sendText(ctx, stream, agent)(text) }
@@ -206,12 +210,31 @@ func (m model) newEngine(ctx context.Context) (*execution.Engine, error) {
 	return execution.New(ctx, opts)
 }
 
-func runEngineCmd(ctx context.Context, engine *execution.Engine, stream chan<- jobText) tea.Cmd {
+func runEngineCmd(ctx context.Context, engine *execution.Engine, server *control.Server, stream chan<- jobText) tea.Cmd {
 	return func() tea.Msg {
 		defer close(stream)
+		defer server.Close()
 		outcome, err := engine.Run(ctx)
 		return runResultMsg{outcome: outcome, err: err}
 	}
+}
+
+// startRun opens the run's control plane and an engine wired to it.
+func (m model) startRun(ctx context.Context) (*execution.Engine, *control.Server, error) {
+	stream := m.jobStream
+	server, err := control.Listen(control.Options{
+		Store: m.store, RunID: m.run.ID, StateDir: config.StateDir(),
+		OnText: func(agent, text string) { sendText(ctx, stream, agent)(text) },
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	engine, err := m.newEngine(ctx, server)
+	if err != nil {
+		server.Close()
+		return nil, nil, err
+	}
+	return engine, server, nil
 }
 
 func runOutcomeText(outcome string, err error) string {

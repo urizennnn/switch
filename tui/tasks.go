@@ -84,7 +84,7 @@ func (m model) taskAction(action, taskID, reason string) tea.Cmd {
 	engine := m.engine
 	if engine == nil {
 		var err error
-		engine, err = m.newEngine(m.ctx)
+		engine, err = m.newEngine(m.ctx, nil)
 		if err != nil {
 			return func() tea.Msg { return taskActionMsg{title: action + " failed", body: err.Error()} }
 		}

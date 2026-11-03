@@ -199,7 +199,7 @@ func (e *Engine) Approve(ctx context.Context, taskID string) error {
 		return err
 	}
 	task.Status = StatusApproved
-	e.save(ctx, task, "user", "approved")
+	e.save(ctx, task, "user", "")
 
 	before, err := worktree.Head(ctx, e.run.IntegrationPath)
 	if err != nil {

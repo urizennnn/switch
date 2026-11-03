@@ -9,11 +9,13 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/urizennnn/switch/internal/chatcli"
 	"github.com/urizennnn/switch/internal/config"
+	controlplane "github.com/urizennnn/switch/internal/control"
 	"github.com/urizennnn/switch/internal/doctor"
 	"github.com/urizennnn/switch/internal/initcmd"
 	"github.com/urizennnn/switch/internal/plancli"
 	"github.com/urizennnn/switch/internal/probe"
 	"github.com/urizennnn/switch/internal/rules"
+	"github.com/urizennnn/switch/internal/runcli"
 	"github.com/urizennnn/switch/internal/store"
 	buildversion "github.com/urizennnn/switch/internal/version"
 	"github.com/urizennnn/switch/tui"
@@ -45,10 +47,16 @@ func main() {
 // automation, and tests until the Unix-socket control plane lands.
 func control(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "internal control: chat, plan, probe, doctor, init")
+		fmt.Fprintln(os.Stderr, "internal control: chat, plan, run, tasks, approve, reject, retry, diff, log, agent, mcp, probe, doctor, init")
 		return 2
 	}
 	switch args[0] {
+	case "run", "tasks", "approve", "reject", "retry", "diff", "log":
+		return runcli.Run(args[0], args[1:])
+	case "agent":
+		return controlplane.RunAgentCLI(args[1:], os.Stdout, os.Stderr)
+	case "mcp":
+		return controlplane.RunMCP(os.Stdin, os.Stdout)
 	case "chat":
 		return chatcli.Run(args[1:])
 	case "plan":

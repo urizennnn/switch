@@ -747,7 +747,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 			break
 		}
 		ctx := m.startJob("run", "running", false)
-		engine, err := m.newEngine(ctx)
+		engine, server, err := m.startRun(ctx)
 		if err != nil {
 			m.endJob()
 			m.setModal("run failed", err.Error())
@@ -755,7 +755,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		}
 		m.engine = engine
 		m.home = false
-		return m, tea.Batch(runEngineCmd(ctx, engine, m.jobStream), m.waitJob())
+		return m, tea.Batch(runEngineCmd(ctx, engine, server, m.jobStream), m.waitJob())
 
 	case "/stop":
 		if m.job != "run" {
