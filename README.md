@@ -44,6 +44,14 @@ go build -o switch .
 ./switch
 ```
 
+To run `switch` from any directory without building by hand, link the
+launcher onto your PATH. It rebuilds this checkout when its sources change,
+then runs Switch in the directory you are in:
+
+```bash
+ln -s "$PWD/scripts/switch" ~/.local/bin/switch
+```
+
 `switch` is the primary interface. It auto-creates `.switch/config.toml` and
 `.switch/rules.md` on first run in a project.
 
