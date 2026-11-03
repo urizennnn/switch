@@ -14,6 +14,8 @@ type TurnOptions struct {
 	OnText func(string)
 	// OnPermission takes ownership of each request and must answer it.
 	OnPermission func(*PermissionRequest)
+	// OnUsage receives the turn's token counts and the latest reported cost.
+	OnUsage func(UsageInfo)
 }
 
 // RunTurn sends one prompt, streams it, and blocks until the turn ends. It
@@ -31,6 +33,8 @@ func (s *Session) RunTurn(ctx context.Context, prompt string, opts TurnOptions) 
 	}()
 
 	var output strings.Builder
+	var cost float64
+	var currency string
 	for {
 		select {
 		case event := <-s.Events:
@@ -49,7 +53,20 @@ func (s *Session) RunTurn(ctx context.Context, prompt string, opts TurnOptions) 
 					(event.Tool.Status == "completed" || event.Tool.Status == "failed") {
 					onText(fmt.Sprintf("[tool] %s: %s\n", event.Tool.Title, event.Tool.Status))
 				}
+			case EventUsage:
+				if event.Usage != nil && event.Usage.CostAmount > 0 {
+					cost, currency = event.Usage.CostAmount, event.Usage.CostCurrency
+				}
 			case EventTurn:
+				if opts.OnUsage != nil {
+					usage := UsageInfo{CostAmount: cost, CostCurrency: currency}
+					if event.Usage != nil {
+						usage.InputTokens = event.Usage.InputTokens
+						usage.OutputTokens = event.Usage.OutputTokens
+						usage.TotalTokens = event.Usage.TotalTokens
+					}
+					opts.OnUsage(usage)
+				}
 				// Prompt emits EventTurn after every update of the turn, so the
 				// output is complete here; returning on done could drop the tail.
 				onText("\n")

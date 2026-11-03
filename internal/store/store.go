@@ -36,6 +36,7 @@ type Run struct {
 	Goal              string
 	BaseRef           string
 	IntegrationBranch string
+	IntegrationPath   string
 	Status            string
 	CreatedAt         time.Time
 }
@@ -51,6 +52,7 @@ type RunAgent struct {
 	Branch    string
 	SessionID string
 	Status    string
+	Token     string // control-plane credential for this run
 	CreatedAt time.Time
 }
 
@@ -69,6 +71,12 @@ type Task struct {
 	Branch     string
 	Worktree   string
 	Attempts   int
+	SessionID  string // worker ACP session, resumed on retry
+	Commit     string // task commit on Branch, merged on approval
+	Feedback   string // verification or review failure sent to the next attempt
+	Review     string // lead review notes
+	LastError  string
+	Summary    string // worker's completion summary
 	CreatedAt  time.Time
 }
 
@@ -168,7 +176,7 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
-	return nil
+	return s.migrateExecution()
 }
 
 func (s *Store) GetChatSession(ctx context.Context, project string) (ChatSession, bool, error) {
@@ -275,9 +283,9 @@ func (s *Store) LeadAgent(ctx context.Context, project string) (string, bool, er
 
 func (s *Store) CreateRun(ctx context.Context, run Run) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO runs(id, project, goal, base_ref, integration_branch, status, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?)`,
-		run.ID, run.Project, run.Goal, run.BaseRef, run.IntegrationBranch, run.Status,
+		INSERT INTO runs(id, project, goal, base_ref, integration_branch, integration_path, status, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+		run.ID, run.Project, run.Goal, run.BaseRef, run.IntegrationBranch, run.IntegrationPath, run.Status,
 		time.Now().UTC().Format(time.RFC3339))
 	return err
 }
@@ -286,9 +294,9 @@ func (s *Store) GetRun(ctx context.Context, id string) (Run, bool, error) {
 	var run Run
 	var created string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, project, goal, base_ref, integration_branch, status, created_at
+		SELECT id, project, goal, base_ref, integration_branch, integration_path, status, created_at
 		FROM runs WHERE id = ?`, id).
-		Scan(&run.ID, &run.Project, &run.Goal, &run.BaseRef, &run.IntegrationBranch, &run.Status, &created)
+		Scan(&run.ID, &run.Project, &run.Goal, &run.BaseRef, &run.IntegrationBranch, &run.IntegrationPath, &run.Status, &created)
 	if err == sql.ErrNoRows {
 		return Run{}, false, nil
 	}
@@ -303,10 +311,10 @@ func (s *Store) LatestRun(ctx context.Context, project string) (Run, bool, error
 	var run Run
 	var created string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, project, goal, base_ref, integration_branch, status, created_at
+		SELECT id, project, goal, base_ref, integration_branch, integration_path, status, created_at
 		FROM runs WHERE project = ?
 		ORDER BY created_at DESC, rowid DESC LIMIT 1`, project).
-		Scan(&run.ID, &run.Project, &run.Goal, &run.BaseRef, &run.IntegrationBranch, &run.Status, &created)
+		Scan(&run.ID, &run.Project, &run.Goal, &run.BaseRef, &run.IntegrationBranch, &run.IntegrationPath, &run.Status, &created)
 	if err == sql.ErrNoRows {
 		return Run{}, false, nil
 	}
@@ -319,8 +327,8 @@ func (s *Store) LatestRun(ctx context.Context, project string) (Run, bool, error
 
 func (s *Store) SaveRunAgent(ctx context.Context, agent RunAgent) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO run_agents(id, run_id, name, role, driver, model, worktree, branch, session_id, status, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO run_agents(id, run_id, name, role, driver, model, worktree, branch, session_id, status, token, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			role = excluded.role,
@@ -329,16 +337,17 @@ func (s *Store) SaveRunAgent(ctx context.Context, agent RunAgent) error {
 			worktree = excluded.worktree,
 			branch = excluded.branch,
 			session_id = excluded.session_id,
-			status = excluded.status`,
+			status = excluded.status,
+			token = excluded.token`,
 		agent.ID, agent.RunID, agent.Name, agent.Role, agent.Driver, agent.Model,
-		agent.Worktree, agent.Branch, agent.SessionID, agent.Status,
+		agent.Worktree, agent.Branch, agent.SessionID, agent.Status, agent.Token,
 		time.Now().UTC().Format(time.RFC3339))
 	return err
 }
 
 func (s *Store) RunAgents(ctx context.Context, runID string) ([]RunAgent, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, run_id, name, role, driver, model, worktree, branch, session_id, status, created_at
+		SELECT id, run_id, name, role, driver, model, worktree, branch, session_id, status, token, created_at
 		FROM run_agents WHERE run_id = ? ORDER BY rowid`, runID)
 	if err != nil {
 		return nil, err
@@ -350,7 +359,7 @@ func (s *Store) RunAgents(ctx context.Context, runID string) ([]RunAgent, error)
 		var agent RunAgent
 		var created string
 		if err := rows.Scan(&agent.ID, &agent.RunID, &agent.Name, &agent.Role, &agent.Driver,
-			&agent.Model, &agent.Worktree, &agent.Branch, &agent.SessionID, &agent.Status, &created); err != nil {
+			&agent.Model, &agent.Worktree, &agent.Branch, &agent.SessionID, &agent.Status, &agent.Token, &created); err != nil {
 			return nil, err
 		}
 		agent.CreatedAt, _ = time.Parse(time.RFC3339, created)
@@ -367,8 +376,9 @@ func (s *Store) SaveTask(ctx context.Context, task Task) error {
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO tasks(id, run_id, title, brief, role, deps_json, files_json, acceptance_json,
-			verify_json, status, assignee, branch, worktree, attempts, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			verify_json, status, assignee, branch, worktree, attempts, session_id, commit_sha,
+			feedback, review, last_error, summary, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			title = excluded.title,
 			brief = excluded.brief,
@@ -381,30 +391,42 @@ func (s *Store) SaveTask(ctx context.Context, task Task) error {
 			assignee = excluded.assignee,
 			branch = excluded.branch,
 			worktree = excluded.worktree,
-			attempts = excluded.attempts`,
+			attempts = excluded.attempts,
+			session_id = excluded.session_id,
+			commit_sha = excluded.commit_sha,
+			feedback = excluded.feedback,
+			review = excluded.review,
+			last_error = excluded.last_error,
+			summary = excluded.summary`,
 		task.ID, task.RunID, task.Title, task.Brief, task.Role, string(deps), string(files),
 		string(acceptance), string(verify), task.Status, task.Assignee, task.Branch,
-		task.Worktree, task.Attempts, time.Now().UTC().Format(time.RFC3339))
+		task.Worktree, task.Attempts, task.SessionID, task.Commit, task.Feedback, task.Review,
+		task.LastError, task.Summary, time.Now().UTC().Format(time.RFC3339))
 	return err
 }
 
+const taskColumns = `id, run_id, title, brief, role, deps_json, files_json, acceptance_json,
+	verify_json, status, assignee, branch, worktree, attempts, session_id, commit_sha,
+	feedback, review, last_error, summary, created_at`
+
 func (s *Store) TasksForRun(ctx context.Context, runID string) ([]Task, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, run_id, title, brief, role, deps_json, files_json, acceptance_json,
-			verify_json, status, assignee, branch, worktree, attempts, created_at
-		FROM tasks WHERE run_id = ? ORDER BY rowid`, runID)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE run_id = ? ORDER BY rowid`, runID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	return scanTasks(rows)
+}
 
+func scanTasks(rows *sql.Rows) ([]Task, error) {
+	defer rows.Close()
 	var tasks []Task
 	for rows.Next() {
 		var task Task
 		var deps, files, acceptance, verify, created string
 		if err := rows.Scan(&task.ID, &task.RunID, &task.Title, &task.Brief, &task.Role,
 			&deps, &files, &acceptance, &verify, &task.Status, &task.Assignee,
-			&task.Branch, &task.Worktree, &task.Attempts, &created); err != nil {
+			&task.Branch, &task.Worktree, &task.Attempts, &task.SessionID, &task.Commit,
+			&task.Feedback, &task.Review, &task.LastError, &task.Summary, &created); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(deps), &task.Deps)

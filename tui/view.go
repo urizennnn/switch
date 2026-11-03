@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/urizennnn/switch/internal/store"
 )
 
 func (m model) View() tea.View {
@@ -29,6 +30,8 @@ func (m model) View() tea.View {
 			footer = "enter again to confirm · esc cancel"
 		}
 		return tea.NewView(m.withModal(base, width, "ACP adapters", m.adapterPickerContent(width), footer))
+	case m.taskPicker != nil:
+		return tea.NewView(m.withModal(base, width, "tasks", m.taskPickerContent(min(82, max(44, width*2/3))), "enter details · a approve · r reject · d diff · t retry · esc"))
 	case m.picker != nil:
 		return tea.NewView(m.withModal(base, width, "choose lead", m.pickerContent(width), "↑/↓ select · enter choose · esc cancel"))
 	case m.modal != "":
@@ -74,8 +77,20 @@ func (m *model) layout() {
 	_, mainWidth := m.paneWidths(width)
 
 	m.viewport.SetWidth(max(20, mainWidth-4))
-	m.viewport.SetHeight(max(5, m.bodyHeight()-3))
+	m.viewport.SetHeight(max(3, m.mainPaneHeight()-3))
 	m.input.SetWidth(max(10, width-4))
+}
+
+// mainPaneHeight leaves room for the job log while a job runs.
+func (m model) mainPaneHeight() int {
+	if m.job == "" {
+		return m.bodyHeight()
+	}
+	return m.bodyHeight() - m.jobLogHeight()
+}
+
+func (m model) jobLogHeight() int {
+	return max(6, m.bodyHeight()*2/5)
 }
 
 func (m model) bodyHeight() int {
@@ -109,8 +124,16 @@ func (m model) bodyView(width int) string {
 	height := m.bodyHeight()
 
 	sidebar := panel(sidebarWidth, height, "workspace", m.sidebarContent(sidebarWidth))
-	mainContent := m.mainContent(mainWidth, height)
-	main := panel(mainWidth, height, m.mainTitle(), mainContent)
+	var main string
+	if m.job != "" {
+		// The job log sits under the main pane so chat stays usable during a run.
+		logHeight, mainHeight := m.jobLogHeight(), m.mainPaneHeight()
+		main = lipgloss.JoinVertical(lipgloss.Left,
+			panel(mainWidth, mainHeight, m.mainTitle(), m.mainContent(mainWidth, mainHeight)),
+			panel(mainWidth, logHeight, m.jobLogTitle(), m.jobLogView(mainWidth, logHeight)))
+	} else {
+		main = panel(mainWidth, height, m.mainTitle(), m.mainContent(mainWidth, height))
+	}
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, sidebar, " ", main)
 }
@@ -130,7 +153,9 @@ func (m model) sidebarContent(width int) string {
 		name := fmt.Sprintf("%-10s", truncate(agent.Name, 10))
 		state := "idle"
 		if active {
-			state = "active"
+			state = "lead"
+		} else if task, ok := m.agentTask(agent.Name); ok {
+			state = truncate(shortTaskID(task.ID), 12)
 		}
 		line := marker + " " + nameStyle.Render(name) + " " + mutedStyle.Render(state)
 		if active {
@@ -150,12 +175,30 @@ func (m model) sidebarContent(width int) string {
 		b.WriteString(dimStyle.Render("/plan <goal>"))
 		b.WriteString("\n")
 	} else {
-		queued, running, done := m.taskCounts()
+		queued, active, review, merged, blocked := m.taskCounts()
 		b.WriteString(textStyle.Render(shortID(m.run.ID)) + " " + mutedStyle.Render(m.run.Status))
 		b.WriteString("\n")
-		b.WriteString(mutedStyle.Render(fmt.Sprintf("q:%d  r:%d  d:%d", queued, running, done)))
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("queued %d · active %d", queued, active)))
 		b.WriteString("\n")
-		b.WriteString(dimStyle.Render(fmt.Sprintf("agents %d · /run next task", len(m.runAgents))))
+		reviewLine := fmt.Sprintf("review %d · merged %d", review, merged)
+		if review > 0 {
+			b.WriteString(warningStyle.Render(reviewLine))
+		} else {
+			b.WriteString(mutedStyle.Render(reviewLine))
+		}
+		b.WriteString("\n")
+		if blocked > 0 {
+			b.WriteString(errorStyle.Render(fmt.Sprintf("blocked %d", blocked)))
+			b.WriteString("\n")
+		}
+		hint := "/run to start"
+		switch {
+		case m.job == "run":
+			hint = "/tasks · /stop"
+		case review > 0:
+			hint = "/review to approve"
+		}
+		b.WriteString(dimStyle.Render(hint))
 		b.WriteString("\n")
 	}
 
@@ -171,8 +214,6 @@ func (m model) mainTitle() string {
 	switch {
 	case m.chat == nil:
 		return "connecting"
-	case m.job != "":
-		return m.job
 	case m.home:
 		return "overview"
 	default:
@@ -190,12 +231,6 @@ func (m model) mainContent(width, height int) string {
 		}
 		return textStyle.Render("starting "+m.lead.Name+" ("+m.lead.Driver+")…") + "\n\n" +
 			dimStyle.Render("the TUI is ready; the agent is connecting in the background")
-	case m.job != "":
-		text := strings.TrimSpace(m.jobBuffer.String())
-		if text == "" {
-			text = "waiting for the agent…"
-		}
-		return textStyle.Render(tailLines(text, max(3, height-5))) + "\n\n" + dimStyle.Render("streaming "+m.job+" output · esc to cancel")
 	case m.home:
 		return m.overviewContent(width)
 	default:
@@ -349,8 +384,8 @@ func (m model) statusView(width int) string {
 
 	parts := make([]string, 0, 3)
 	if m.run != nil {
-		queued, running, done := m.taskCounts()
-		parts = append(parts, dimStyle.Render("run "+shortID(m.run.ID))+" "+mutedStyle.Render(fmt.Sprintf("%dq/%dr/%dd", queued, running, done)))
+		queued, active, review, merged, _ := m.taskCounts()
+		parts = append(parts, dimStyle.Render("run "+shortID(m.run.ID))+" "+mutedStyle.Render(fmt.Sprintf("%dq/%da/%dr/%dm", queued, active, review, merged)))
 	}
 	parts = append(parts, stateStyle.Render(strings.ToUpper(m.state)))
 	parts = append(parts, dimStyle.Render("/ commands"))
@@ -387,4 +422,33 @@ func sessionState(resumed bool) string {
 		return "resumed"
 	}
 	return "new"
+}
+
+func (m model) jobLogView(width, height int) string {
+	text := m.jobLogText()
+	if text == "" {
+		text = dimStyle.Render("waiting for the agent…")
+	}
+	var lines []string
+	for _, line := range strings.Split(tailLines(text, max(1, height-3)), "\n") {
+		lines = append(lines, truncate(line, max(10, width-4)))
+	}
+	return mutedStyle.Render(strings.Join(lines, "\n"))
+}
+
+// agentTask is the task an agent is working on, if any.
+func (m model) agentTask(name string) (store.Task, bool) {
+	for _, task := range m.tasks {
+		if task.Assignee == name && isActive(task.Status) {
+			return task, true
+		}
+	}
+	return store.Task{}, false
+}
+
+func (m model) jobLogTitle() string {
+	if m.job == "plan" {
+		return "plan log · esc to cancel"
+	}
+	return "run log · /stop to end"
 }

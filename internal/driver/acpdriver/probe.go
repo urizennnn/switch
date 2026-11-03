@@ -216,7 +216,7 @@ func Probe(ctx context.Context, opts ProbeOptions) error {
 		printReport(opts.Stdout, report)
 	}
 
-	session, err := openSession(ctx, conn, initResp, cwd, opts.SessionID)
+	session, err := openSession(ctx, conn, initResp, cwd, opts.SessionID, nil)
 	if err != nil {
 		_ = closeSession(ctx, conn, initResp, "")
 		stop()
@@ -332,14 +332,17 @@ type sessionState struct {
 	Modes         *acp.SessionModeState
 }
 
-func openSession(ctx context.Context, conn *acp.ClientSideConnection, init acp.InitializeResponse, cwd, sessionID string) (sessionState, error) {
+func openSession(ctx context.Context, conn *acp.ClientSideConnection, init acp.InitializeResponse, cwd, sessionID string, mcpServers []acp.McpServer) (sessionState, error) {
+	if mcpServers == nil {
+		mcpServers = []acp.McpServer{} // the field is required; null is rejected
+	}
 	if sessionID != "" {
 		switch {
 		case init.AgentCapabilities.SessionCapabilities.Resume != nil:
 			resp, err := conn.ResumeSession(ctx, acp.ResumeSessionRequest{
 				SessionId:  acp.SessionId(sessionID),
 				Cwd:        cwd,
-				McpServers: []acp.McpServer{},
+				McpServers: mcpServers,
 			})
 			if err != nil {
 				return sessionState{}, err
@@ -358,7 +361,7 @@ func openSession(ctx context.Context, conn *acp.ClientSideConnection, init acp.I
 			resp, err := conn.LoadSession(ctx, acp.LoadSessionRequest{
 				SessionId:  acp.SessionId(sessionID),
 				Cwd:        cwd,
-				McpServers: []acp.McpServer{},
+				McpServers: mcpServers,
 			})
 			if err != nil {
 				return sessionState{}, err
@@ -380,7 +383,7 @@ func openSession(ctx context.Context, conn *acp.ClientSideConnection, init acp.I
 
 	resp, err := conn.NewSession(ctx, acp.NewSessionRequest{
 		Cwd:        cwd,
-		McpServers: []acp.McpServer{},
+		McpServers: mcpServers,
 	})
 	if err != nil {
 		return sessionState{}, err

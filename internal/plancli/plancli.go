@@ -79,9 +79,8 @@ func Run(args []string) int {
 	fmt.Printf("run:         %s\n", short(result.Run.ID))
 	fmt.Printf("integration: %s\n", result.Run.IntegrationBranch)
 	fmt.Println("agents:")
-	for _, item := range result.Agents {
-		fmt.Printf("  %-10s %-8s %-10s %s\n",
-			item.Agent.Name, item.Agent.Role, item.Agent.Driver, item.Worktree.Path)
+	for _, agent := range result.Agents {
+		fmt.Printf("  %-10s %-8s %s\n", agent.Name, agent.Role, agent.Driver)
 	}
 	fmt.Println("tasks:")
 	for _, task := range result.Plan.Tasks {
@@ -92,7 +91,7 @@ func Run(args []string) int {
 		fmt.Printf("  %-12s %-8s deps=%-12s %s\n", task.ID, task.Role, deps, task.Title)
 	}
 	fmt.Printf("\nrun saved. worktrees: %s\n", result.Root)
-	fmt.Println("task execution is the next Phase 2 step.")
+	fmt.Println("start it with /run in the TUI or `switch __control run`.")
 	return 0
 }
 

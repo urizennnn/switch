@@ -96,6 +96,7 @@ func runTUI() error {
 		Created: created,
 		Fleet:   cfg.Fleet(),
 		Lead:    lead,
+		Run:     cfg.Run,
 	}))
 	_, err = program.Run()
 	return err

@@ -13,6 +13,7 @@ import (
 	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/doctor"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
+	"github.com/urizennnn/switch/internal/execution"
 	"github.com/urizennnn/switch/internal/planning"
 )
 
@@ -190,6 +191,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		if m.taskPicker != nil {
+			return m.handleTaskPickerKey(msg)
+		}
+
 		if m.picker != nil {
 			switch msg.String() {
 			case "esc":
@@ -264,11 +269,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc":
 			switch {
-			case m.jobCancel != nil:
-				m.jobCancel()
-				m.state = "cancelling"
 			case m.busy && m.state == "working":
 				_ = m.chat.Session.Cancel(context.Background())
+				m.state = "cancelling"
+			case m.job == "plan":
+				// A run is long-lived; only /stop ends it, so a stray esc cannot.
+				m.jobCancel()
 				m.state = "cancelling"
 			}
 			return m, nil
@@ -346,7 +352,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case jobPermissionMsg:
 		m.permission = msg.request
-		m.permissionResume = waitJob(m.jobStream, m.jobPermissions)
+		m.permissionResume = m.waitJob()
 		m.state = "permission"
 		return m, nil
 
@@ -374,8 +380,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.job == "" {
 			return m, nil
 		}
-		m.jobBuffer.WriteString(msg.text)
-		return m, waitJob(m.jobStream, m.jobPermissions)
+		m.appendJobText(msg.agent, msg.text)
+		return m, m.waitJob()
+
+	case jobChangedMsg:
+		m.refreshDashboard()
+		return m, m.waitJob()
+
+	case taskActionMsg:
+		m.refreshDashboard()
+		m.setModal(msg.title, msg.body)
+		return m, nil
 
 	case jobStreamClosedMsg:
 		return m, nil
@@ -391,7 +406,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case runResultMsg:
 		m.endJob()
-		m.setModal(runSummary(msg.result, msg.err))
+		m.setModal("run "+msg.outcome, runOutcomeText(msg.outcome, msg.err))
 		return m, nil
 
 	case doctorResultMsg:
@@ -648,10 +663,10 @@ func (m model) handlePermissionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	resume := m.permissionResume
 	m.permission = nil
 	m.permissionResume = nil
-	switch m.job {
-	case "plan":
+	switch {
+	case m.job == "plan":
 		m.state = "planning"
-	case "run":
+	case m.job == "run" && !m.busy:
 		m.state = "running"
 	default:
 		m.state = "working"
@@ -668,6 +683,19 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	case "/plan", "/run", "/doctor", "/lead", "/adapters", "/new":
 		if m.busy {
 			m.setModal("busy", "wait for the current turn to finish")
+			return m, nil
+		}
+	}
+	switch command {
+	case "/plan", "/run", "/adapters":
+		// Never plan, start a second run, or install adapters mid-run.
+		if m.job == "run" {
+			m.setModal("run in progress", "/stop ends the run first")
+			return m, nil
+		}
+	case "/tasks", "/review", "/agents", "/log", "/approve", "/reject", "/retry", "/diff":
+		if m.run == nil {
+			m.setModal("no run", "/plan <goal> or /plan --file <path> creates one")
 			return m, nil
 		}
 	}
@@ -707,10 +735,10 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		} else {
 			goal = strings.TrimSpace(strings.TrimPrefix(text, "/plan"))
 		}
-		ctx, stream, permissions := m.startJob("plan", "planning")
+		ctx := m.startJob("plan", "planning", true)
 		return m, tea.Batch(
-			startPlanCmd(ctx, m.chat.Project, goal, file, m.lead, stream),
-			waitJob(stream, permissions),
+			startPlanCmd(ctx, m.project, goal, file, m.lead, m.jobStream),
+			m.waitJob(),
 		)
 
 	case "/run":
@@ -718,11 +746,66 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 			m.setModal("run", "no run yet\n\n/plan <goal> or /plan --file <path> first")
 			break
 		}
-		ctx, stream, permissions := m.startJob("run", "running")
-		return m, tea.Batch(
-			runTaskCmd(ctx, m.store, m.run.ID, m.rules, stream, permissions),
-			waitJob(stream, permissions),
-		)
+		ctx := m.startJob("run", "running", false)
+		engine, err := m.newEngine(ctx)
+		if err != nil {
+			m.endJob()
+			m.setModal("run failed", err.Error())
+			break
+		}
+		m.engine = engine
+		m.home = false
+		return m, tea.Batch(runEngineCmd(ctx, engine, m.jobStream), m.waitJob())
+
+	case "/stop":
+		if m.job != "run" {
+			m.setModal("stop", "no run in progress")
+			break
+		}
+		m.jobCancel()
+		m.state = "cancelling"
+
+	case "/tasks", "/review":
+		m.taskPicker = &taskPicker{}
+		if command == "/review" {
+			for i, task := range m.tasks {
+				if task.Status == execution.StatusReview {
+					m.taskPicker.index = i
+					break
+				}
+			}
+		}
+
+	case "/agents":
+		m.setModal("agents", m.agentsContent())
+
+	case "/log":
+		m.setModal("run log", m.logContent())
+
+	case "/approve", "/retry", "/diff":
+		if len(fields) < 2 {
+			m.setModal(command[1:], "usage: "+command+" <task>")
+			break
+		}
+		task, ok := m.findTask(fields[1])
+		if !ok {
+			m.setModal(command[1:], "unknown task "+fields[1]+"\n/tasks lists them")
+			break
+		}
+		return m, m.taskAction(command[1:], task.ID, "")
+
+	case "/reject":
+		if len(fields) < 2 {
+			m.setModal("reject", "usage: /reject <task> <reason>")
+			break
+		}
+		task, ok := m.findTask(fields[1])
+		if !ok {
+			m.setModal("reject", "unknown task "+fields[1]+"\n/tasks lists them")
+			break
+		}
+		reason := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(text, "/reject")), fields[1]))
+		return m, m.taskAction("reject", task.ID, reason)
 
 	case "/doctor":
 		m.busy = true
@@ -785,8 +868,8 @@ func planSummary(result *planning.Result) string {
 	fmt.Fprintf(&b, "run %s planned\n", shortID(result.Run.ID))
 	fmt.Fprintf(&b, "integration: %s\n", result.Run.IntegrationBranch)
 	names := make([]string, 0, len(result.Agents))
-	for _, item := range result.Agents {
-		names = append(names, item.Agent.Name)
+	for _, agent := range result.Agents {
+		names = append(names, agent.Name)
 	}
 	fmt.Fprintf(&b, "agents: %s\n", strings.Join(names, ", "))
 	b.WriteString("tasks:\n")

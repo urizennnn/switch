@@ -25,6 +25,9 @@ type Spec struct {
 	Model     string
 	SessionID string // resume when non-empty
 	Env       []string
+	// MCPServers are offered to the agent for this session (stdio is the
+	// transport every agent must support).
+	MCPServers []acp.McpServer
 	// AgentLogs, when non-nil, receives adapter stderr. Otherwise stderr is
 	// buffered for diagnostics.
 	AgentLogs io.Writer
@@ -248,7 +251,7 @@ func Open(ctx context.Context, spec Spec) (*Session, error) {
 	}
 	session.init = initResp
 
-	state, err := openSession(ctx, conn, initResp, cwd, spec.SessionID)
+	state, err := openSession(ctx, conn, initResp, cwd, spec.SessionID, spec.MCPServers)
 	if err != nil {
 		session.Close(context.Background())
 		return nil, session.wrapError("session", err)

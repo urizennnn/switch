@@ -31,15 +31,10 @@ type Options struct {
 	OnText     func(string)
 }
 
-type AgentWorktree struct {
-	Agent    store.RunAgent
-	Worktree worktree.Worktree
-}
-
 type Result struct {
 	Run         store.Run
 	Lead        config.Agent
-	Agents      []AgentWorktree
+	Agents      []store.RunAgent
 	Tasks       []store.Task
 	Plan        plan.Plan
 	Integration worktree.Worktree
@@ -150,6 +145,7 @@ func Execute(ctx context.Context, opts Options) (*Result, error) {
 		Goal:              planned.Goal,
 		BaseRef:           base,
 		IntegrationBranch: branch,
+		IntegrationPath:   integration.Path,
 		Status:            "planned",
 	}
 	if err := state.CreateRun(ctx, run); err != nil {
@@ -165,13 +161,11 @@ func Execute(ctx context.Context, opts Options) (*Result, error) {
 		Created:     created,
 	}
 
+	// Tasks get their own worktrees when dispatched; agents only need records.
 	for _, agent := range fleet {
-		wt, err := manager.Create(ctx, runID, agent.Name, base)
-		if err != nil {
-			return nil, fmt.Errorf("create worktree for %s: %w", agent.Name, err)
-		}
 		role := agent.Role
 		if agent.Name == lead.Name {
+			agent = lead
 			role = "lead" // the run's lead plans and reviews; it never takes tasks
 		}
 		runAgent := store.RunAgent{
@@ -181,15 +175,13 @@ func Execute(ctx context.Context, opts Options) (*Result, error) {
 			Role:      role,
 			Driver:    agent.Driver,
 			Model:     agent.Model,
-			Worktree:  wt.Path,
-			Branch:    wt.Branch,
 			Status:    "idle",
 			CreatedAt: time.Now().UTC(),
 		}
 		if err := state.SaveRunAgent(ctx, runAgent); err != nil {
 			return nil, fmt.Errorf("save agent %s: %w", agent.Name, err)
 		}
-		result.Agents = append(result.Agents, AgentWorktree{Agent: runAgent, Worktree: wt})
+		result.Agents = append(result.Agents, runAgent)
 	}
 
 	taskIDs := make(map[string]string, len(planned.Tasks))

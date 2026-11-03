@@ -14,7 +14,21 @@ type Config struct {
 	Agent  string      `toml:"agent"`
 	Model  string      `toml:"model"`
 	Rules  RulesConfig `toml:"rules"`
+	Run    RunConfig   `toml:"run"`
 	Agents []Agent     `toml:"agents"`
+}
+
+// RunConfig bounds task execution. Zero budgets mean unlimited.
+type RunConfig struct {
+	MaxConcurrency int  `toml:"max_concurrency"`
+	MaxAttempts    int  `toml:"max_attempts"`
+	LeadReview     bool `toml:"lead_review"`
+	// VerifyTimeout is per verification command, in seconds.
+	VerifyTimeout int `toml:"verify_timeout"`
+	// TurnTimeout bounds one worker or review turn, in seconds.
+	TurnTimeout int `toml:"turn_timeout"`
+	MaxTurns    int `toml:"max_turns"`
+	MaxTokens   int `toml:"max_tokens"`
 }
 
 type Agent struct {
@@ -40,6 +54,14 @@ func Defaults(projectDir string) Config {
 			Project: filepath.Join(projectDir, ".switch", "rules.md"),
 			Local:   filepath.Join(projectDir, ".switch", "rules.local.md"),
 			Inject:  true,
+		},
+		Run: RunConfig{
+			MaxConcurrency: 2,
+			MaxAttempts:    3,
+			LeadReview:     true,
+			VerifyTimeout:  600,
+			TurnTimeout:    1800,
+			MaxTurns:       50,
 		},
 	}
 }
@@ -174,7 +196,17 @@ model = "opencode/deepseek-v4.1-flash-free"
 
 [rules]
 # Global rules are always applied. Project rules live next to this file.
+# Role and task rules: .switch/rules/roles/<role>.md, .switch/rules/tasks/<task>.md
 inject = true
+
+[run]
+max_concurrency = 2   # tasks running at once
+max_attempts = 3      # worker attempts per task before it is blocked
+lead_review = true    # the lead reviews each verified diff before you approve
+verify_timeout = 600  # seconds per verification command
+turn_timeout = 1800   # seconds per worker or review turn
+max_turns = 50        # worker turns per run (0 = unlimited)
+max_tokens = 0        # tokens per run (0 = unlimited)
 
 [[agents]]
 name = "lead"

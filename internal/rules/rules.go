@@ -31,28 +31,61 @@ func Load(cfg config.RulesConfig) (Set, error) {
 		{cfg.Project, "project"},
 		{cfg.Local, "local"},
 	} {
-		path := expandHome(item.path)
-		if strings.TrimSpace(path) == "" {
-			continue
+		if err := set.add(expandHome(item.path), item.scope); err != nil {
+			return Set{}, err
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return Set{}, fmt.Errorf("read rules %s: %w", path, err)
-		}
-		text := strings.TrimSpace(string(data))
-		if text == "" {
-			continue
-		}
-		set.Sources = append(set.Sources, Source{
-			Path:  path,
-			Scope: item.scope,
-			Text:  text,
-		})
 	}
 	return set, nil
+}
+
+// Scoped returns base plus role and task rules, in precedence order global →
+// project → local → role → task. Role rules live in
+// .switch/rules/roles/<role>.md and task rules in .switch/rules/tasks/<task>.md
+// under project; both are optional. Lead-only guidance belongs in
+// roles/lead.md, which workers never receive.
+func Scoped(base Set, project, role, task string) (Set, error) {
+	set := Set{Sources: append([]Source(nil), base.Sources...)}
+	dir := filepath.Join(project, ".switch", "rules")
+	if name, ok := fileName(role); ok {
+		if err := set.add(filepath.Join(dir, "roles", name+".md"), "role:"+name); err != nil {
+			return Set{}, err
+		}
+	}
+	if name, ok := fileName(task); ok {
+		if err := set.add(filepath.Join(dir, "tasks", name+".md"), "task:"+name); err != nil {
+			return Set{}, err
+		}
+	}
+	return set, nil
+}
+
+// fileName rejects names that would escape the rules directory; task IDs come
+// from lead-written plans.
+func fileName(name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return "", false
+	}
+	return name, true
+}
+
+func (s *Set) add(path, scope string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read rules %s: %w", path, err)
+	}
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return nil
+	}
+	s.Sources = append(s.Sources, Source{Path: path, Scope: scope, Text: text})
+	return nil
 }
 
 func (s Set) Empty() bool {

@@ -11,6 +11,7 @@ import (
 	"github.com/urizennnn/switch/internal/chat"
 	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
+	"github.com/urizennnn/switch/internal/execution"
 	"github.com/urizennnn/switch/internal/rules"
 	"github.com/urizennnn/switch/internal/store"
 )
@@ -23,6 +24,7 @@ type Options struct {
 	Created []string
 	Fleet   []config.Agent
 	Lead    config.Agent
+	Run     config.RunConfig
 }
 
 type model struct {
@@ -59,10 +61,15 @@ type model struct {
 	modal            string
 	job              string
 	jobCancel        context.CancelFunc
-	jobStream        chan string
+	jobStream        chan jobText
 	jobPermissions   chan *acpdriver.PermissionRequest
-	jobBuffer        strings.Builder
+	jobChanges       chan struct{}
+	jobLog           string
+	jobPartial       map[string]string
 	permissionResume tea.Cmd
+	engine           *execution.Engine
+	runConfig        config.RunConfig
+	taskPicker       *taskPicker
 	picker           *leadPicker
 	adapterPicker    *adapterPicker
 	run              *store.Run
@@ -97,6 +104,7 @@ func New(opts Options) model {
 		created:    opts.Created,
 		fleet:      opts.Fleet,
 		lead:       opts.Lead,
+		runConfig:  opts.Run,
 		input:      input,
 		viewport:   viewportModel,
 		width:      80,
@@ -219,10 +227,10 @@ func shortID(id string) string {
 }
 
 func (m *model) refreshDashboard() {
-	if m.store == nil || m.chat == nil {
+	if m.store == nil || m.project == "" {
 		return
 	}
-	run, ok, err := m.store.LatestRun(m.ctx, m.chat.Project)
+	run, ok, err := m.store.LatestRun(m.ctx, m.project)
 	if err != nil || !ok {
 		m.run = nil
 		m.tasks = nil
@@ -252,18 +260,23 @@ func (m model) fleetAgent(name string) (config.Agent, bool) {
 	return config.Agent{}, false
 }
 
-func (m model) taskCounts() (queued, running, done int) {
+// taskCounts groups task statuses for the sidebar and status bar.
+func (m model) taskCounts() (queued, active, review, merged, blocked int) {
 	for _, task := range m.tasks {
 		switch task.Status {
-		case "queued", "interrupted":
+		case execution.StatusQueued, execution.StatusInterrupted:
 			queued++
-		case "running", "assigned", "implemented", "verifying", "review":
-			running++
-		case "done", "merged", "approved":
-			done++
+		case execution.StatusReview:
+			review++
+		case execution.StatusMerged, "done":
+			merged++
+		case execution.StatusBlocked, "failed":
+			blocked++
+		default:
+			active++
 		}
 	}
-	return queued, running, done
+	return queued, active, review, merged, blocked
 }
 
 type connectedMsg struct {

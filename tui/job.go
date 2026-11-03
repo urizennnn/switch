@@ -2,8 +2,6 @@ package tui
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -12,20 +10,27 @@ import (
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/execution"
 	"github.com/urizennnn/switch/internal/planning"
-	"github.com/urizennnn/switch/internal/rules"
-	"github.com/urizennnn/switch/internal/store"
 )
 
-// A job is a background agent turn outside the chat: /plan or /run. Its text
-// streams into the main pane and esc cancels it.
+// A job is background agent work outside the chat: /plan or /run. Its output
+// streams into the log panel. Esc cancels a plan; only /stop ends a run. A plan job holds the input like a chat turn; a run job does
+// not, so the user can chat with the lead and approve tasks while it runs.
 
-type jobTextMsg struct {
-	text string
+// maxJobLog bounds the log panel's history.
+const maxJobLog = 64 * 1024
+
+type jobText struct {
+	agent string
+	text  string
 }
+
+type jobTextMsg jobText
 
 type jobPermissionMsg struct {
 	request *acpdriver.PermissionRequest
 }
+
+type jobChangedMsg struct{}
 
 type jobStreamClosedMsg struct{}
 
@@ -35,44 +40,55 @@ type planResultMsg struct {
 }
 
 type runResultMsg struct {
-	result *execution.Result
-	err    error
+	outcome string
+	err     error
 }
 
-func (m *model) startJob(name, state string) (context.Context, chan string, chan *acpdriver.PermissionRequest) {
+func (m *model) startJob(name, state string, holdInput bool) context.Context {
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.job = name
 	m.jobCancel = cancel
-	m.jobStream = make(chan string, 64)
+	m.jobStream = make(chan jobText, 64)
 	m.jobPermissions = make(chan *acpdriver.PermissionRequest)
-	m.jobBuffer.Reset()
-	m.busy = true
-	m.state = state
-	return ctx, m.jobStream, m.jobPermissions
+	m.jobChanges = make(chan struct{}, 1)
+	m.jobLog = ""
+	m.jobPartial = map[string]string{}
+	if holdInput {
+		m.busy = true
+		m.state = state
+	} else if !m.busy {
+		m.state = state
+	}
+	m.layout()
+	return ctx
 }
 
 func (m *model) endJob() {
 	if m.jobCancel != nil {
 		m.jobCancel()
 	}
+	if m.job == "plan" || !m.busy {
+		m.busy = false
+		m.state = "ready"
+	}
 	m.job = ""
 	m.jobCancel = nil
 	m.jobStream = nil
 	m.jobPermissions = nil
-	m.jobBuffer.Reset()
-	m.busy = false
-	m.state = "ready"
+	m.jobChanges = nil
+	m.engine = nil
+	m.layout()
 	m.refreshDashboard()
 }
 
-// stopJob cancels a running job and waits briefly for its adapter to exit, so
-// quitting does not leave an orphan process.
+// stopJob cancels a running job and waits briefly for its adapters to exit,
+// so quitting does not leave orphan processes.
 func (m *model) stopJob() {
 	if m.jobCancel == nil {
 		return
 	}
 	m.jobCancel()
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(10 * time.Second)
 	for {
 		select {
 		case _, ok := <-m.jobStream:
@@ -85,30 +101,65 @@ func (m *model) stopJob() {
 	}
 }
 
-func waitJob(stream <-chan string, permissions <-chan *acpdriver.PermissionRequest) tea.Cmd {
+func (m model) waitJob() tea.Cmd {
+	stream, permissions, changes := m.jobStream, m.jobPermissions, m.jobChanges
+	if stream == nil {
+		return nil
+	}
 	return func() tea.Msg {
 		select {
 		case text, ok := <-stream:
 			if !ok {
 				return jobStreamClosedMsg{}
 			}
-			return jobTextMsg{text: text}
+			return jobTextMsg(text)
 		case request := <-permissions:
 			return jobPermissionMsg{request: request}
+		case <-changes:
+			return jobChangedMsg{}
 		}
 	}
 }
 
-func streamTo(ctx context.Context, stream chan<- string) func(string) {
+// appendJobText adds streamed text to the log, one prefixed line per agent
+// line, so concurrent workers do not interleave mid-line.
+func (m *model) appendJobText(agent, text string) {
+	pending := m.jobPartial[agent] + text
+	lines := strings.Split(pending, "\n")
+	m.jobPartial[agent] = lines[len(lines)-1]
+	for _, line := range lines[:len(lines)-1] {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		m.jobLog += agent + "  " + line + "\n"
+	}
+	if len(m.jobLog) > maxJobLog {
+		tail := m.jobLog[len(m.jobLog)-maxJobLog/2:]
+		m.jobLog = tail[strings.IndexByte(tail, '\n')+1:]
+	}
+}
+
+// jobLogText is the log plus each agent's unfinished line.
+func (m model) jobLogText() string {
+	text := m.jobLog
+	for agent, partial := range m.jobPartial {
+		if strings.TrimSpace(partial) != "" {
+			text += agent + "  " + partial + "\n"
+		}
+	}
+	return strings.TrimRight(text, "\n")
+}
+
+func sendText(ctx context.Context, stream chan<- jobText, agent string) func(string) {
 	return func(text string) {
 		select {
-		case stream <- text:
+		case stream <- jobText{agent: agent, text: text}:
 		case <-ctx.Done():
 		}
 	}
 }
 
-func startPlanCmd(ctx context.Context, project, goal, file string, lead config.Agent, stream chan<- string) tea.Cmd {
+func startPlanCmd(ctx context.Context, project, goal, file string, lead config.Agent, stream chan<- jobText) tea.Cmd {
 	return func() tea.Msg {
 		defer close(stream)
 		planCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
@@ -119,52 +170,63 @@ func startPlanCmd(ctx context.Context, project, goal, file string, lead config.A
 			File:       file,
 			Lead:       &lead,
 			Permission: acpdriver.PermissionDeny,
-			OnText:     streamTo(planCtx, stream),
+			OnText:     sendText(planCtx, stream, lead.Name),
 		})
 		return planResultMsg{result: result, err: err}
 	}
 }
 
-func runTaskCmd(ctx context.Context, state *store.Store, runID string, ruleSet rules.Set, stream chan<- string, permissions chan<- *acpdriver.PermissionRequest) tea.Cmd {
+// newEngine builds an engine for the current run, wired to the job channels
+// when a run job is active.
+func (m model) newEngine(ctx context.Context) (*execution.Engine, error) {
+	opts := execution.Options{
+		Store:         m.store,
+		RunID:         m.run.ID,
+		Rules:         m.rules,
+		Config:        m.runConfig,
+		WaitForReview: true,
+	}
+	if stream, permissions, changes := m.jobStream, m.jobPermissions, m.jobChanges; stream != nil {
+		opts.OnText = func(agent, text string) { sendText(ctx, stream, agent)(text) }
+		// Workers ask the user, the same as the chat lead.
+		opts.OnPermission = func(request *acpdriver.PermissionRequest) {
+			select {
+			case permissions <- request:
+			case <-ctx.Done():
+				request.Cancel()
+			}
+		}
+		opts.OnChange = func() {
+			select {
+			case changes <- struct{}{}:
+			default:
+			}
+		}
+	}
+	return execution.New(ctx, opts)
+}
+
+func runEngineCmd(ctx context.Context, engine *execution.Engine, stream chan<- jobText) tea.Cmd {
 	return func() tea.Msg {
 		defer close(stream)
-		result, err := execution.RunNext(ctx, execution.Options{
-			Store:  state,
-			RunID:  runID,
-			Rules:  ruleSet,
-			OnText: streamTo(ctx, stream),
-			// Workers ask the user, the same as the chat lead.
-			OnPermission: func(request *acpdriver.PermissionRequest) {
-				select {
-				case permissions <- request:
-				case <-ctx.Done():
-					request.Cancel()
-				}
-			},
-		})
-		return runResultMsg{result: result, err: err}
+		outcome, err := engine.Run(ctx)
+		return runResultMsg{outcome: outcome, err: err}
 	}
 }
 
-func runSummary(result *execution.Result, err error) (title, body string) {
-	if errors.Is(err, execution.ErrNoReadyTask) {
-		return "run", err.Error()
-	}
-	if result == nil {
-		return "run failed", err.Error()
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "task %s\n", result.Task.Title)
-	fmt.Fprintf(&b, "worker %s (%s)\n", result.Agent.Name, result.Agent.Driver)
-	fmt.Fprintf(&b, "status %s · attempt %d\n", result.Task.Status, result.Task.Attempts)
-	fmt.Fprintf(&b, "worktree %s\n", truncate(result.Task.Worktree, 56))
+func runOutcomeText(outcome string, err error) string {
 	switch {
-	case result.Task.Status == execution.StatusInterrupted:
-		b.WriteString("\ncancelled; /run resumes it")
+	case err != nil && outcome == execution.RunStopped:
+		return "run stopped; running tasks were interrupted. /run resumes them."
 	case err != nil:
-		b.WriteString("\n" + err.Error())
-	case strings.TrimSpace(result.Output) != "":
-		b.WriteString("\n" + strings.TrimSpace(result.Output))
+		return err.Error()
+	case outcome == execution.RunCompleted:
+		return "every task is merged into the integration branch.\nNothing was pushed; merge or push it yourself."
+	case outcome == execution.RunBlocked:
+		return "no task can make progress.\n/tasks shows blocked tasks; /retry <task> requeues one."
+	case outcome == execution.RunBudget:
+		return "stopped by the run budget (max_turns or max_tokens in .switch/config.toml)."
+	default:
+		return "run " + outcome
 	}
-	return "run", b.String()
 }

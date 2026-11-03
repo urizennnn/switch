@@ -1,8 +1,10 @@
-// Package execution dispatches queued run tasks to worker agents.
+// Package execution runs a planned run: it dispatches ready tasks to worker
+// agents, verifies their work, has the lead review it, and merges approved
+// work into the run integration branch.
 //
-// Each run agent owns one worktree, so an agent works on one task at a time;
-// tasks for the same agent are serialized rather than given their own
-// worktrees.
+// Every task gets its own worktree, branched from the integration branch when
+// it is first dispatched, so dependents see merged work and rejected work
+// never leaks into other tasks. A worker runs one task at a time.
 package execution
 
 import (
@@ -10,229 +12,439 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
+	"sync"
 	"time"
 
+	acp "github.com/coder/acp-go-sdk"
+	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/rules"
 	"github.com/urizennnn/switch/internal/store"
+	"github.com/urizennnn/switch/internal/worktree"
 )
 
-// Task statuses written by this package.
+// Task statuses.
 const (
 	StatusQueued      = "queued"
-	StatusRunning     = "running"
-	StatusImplemented = "implemented" // worker finished; waiting for verification
-	StatusFailed      = "failed"
+	StatusRunning     = "running"   // worker turn in progress
+	StatusVerifying   = "verifying" // verification commands running
+	StatusReviewing   = "reviewing" // lead reviewing the diff
+	StatusReview      = "review"    // waiting for the user's approval
+	StatusApproved    = "approved"  // approved; merge in progress
+	StatusMerged      = "merged"
+	StatusBlocked     = "blocked" // needs the user: retries exhausted, conflict, or worker gave up
 	StatusInterrupted = "interrupted"
 )
 
-var ErrNoReadyTask = errors.New("no task is ready: every queued task is blocked by dependencies or has no idle worker for its role")
+// Run outcomes stored in runs.status.
+const (
+	RunRunning   = "running"
+	RunWaiting   = "review"    // waiting for approvals
+	RunCompleted = "completed" // every task merged
+	RunBlocked   = "blocked"   // no task can make progress
+	RunBudget    = "budget"    // stopped by max_turns or max_tokens
+	RunStopped   = "stopped"   // cancelled by the user
+)
+
+// TurnRequest is one agent turn: a worker task attempt or a lead review.
+type TurnRequest struct {
+	Agent      store.RunAgent
+	TaskID     string
+	Cwd        string
+	SessionID  string // resume when non-empty
+	Prompt     string
+	Permission acpdriver.PermissionMode
+	// Ask routes permission requests to Options.OnPermission when set.
+	Ask bool
+}
+
+type TurnResult struct {
+	Output    string
+	SessionID string
+	Usage     acpdriver.UsageInfo
+}
+
+// TurnFunc runs one agent turn. The default starts the agent's ACP adapter.
+type TurnFunc func(ctx context.Context, req TurnRequest) (TurnResult, error)
 
 type Options struct {
-	Store *store.Store
-	RunID string
-	Rules rules.Set
+	Store  *store.Store
+	RunID  string
+	Rules  rules.Set // global/project/local; role and task rules are added per prompt
+	Config config.RunConfig
+	// StateDir holds worktrees; defaults to config.StateDir().
+	StateDir string
+	// WaitForReview keeps Run alive while tasks wait for approval, so a TUI
+	// can approve them. Headless callers return instead.
+	WaitForReview bool
 	// Permission answers worker requests when OnPermission is nil.
 	Permission   acpdriver.PermissionMode
 	OnPermission func(*acpdriver.PermissionRequest)
-	OnText       func(string)
-	AgentLogs    io.Writer
+	OnText       func(agent, text string)
+	// OnChange is called after every task transition.
+	OnChange  func()
+	AgentLogs io.Writer
+	// Turn overrides how agent turns run; tests use a fake.
+	Turn TurnFunc
+	// Control, when set, is offered to agents as the Switch MCP server.
+	Control ControlPlane
 }
 
-type Result struct {
-	Task   store.Task
-	Agent  store.RunAgent
-	Output string
+// ControlPlane lets agents report to Switch during a turn.
+type ControlPlane interface {
+	// Grant returns the MCP servers and environment for one agent turn.
+	Grant(agent store.RunAgent, taskID string) (Grant, error)
+	// TakeBlock returns and clears a block reported by the task's worker.
+	TakeBlock(taskID string) (string, bool)
 }
 
-// Next picks the first runnable task, in plan order, whose dependencies are
-// done and whose role has an idle worker.
-func Next(tasks []store.Task, agents []store.RunAgent) (store.Task, store.RunAgent, bool) {
-	finished := make(map[string]bool, len(tasks))
-	busy := make(map[string]bool)
-	for _, task := range tasks {
-		switch task.Status {
-		case "done", "approved", "merged":
-			finished[task.ID] = true
-		case StatusRunning:
-			busy[task.Assignee] = true
+// Grant is what an agent turn needs to reach the control plane.
+type Grant struct {
+	MCPServers []acp.McpServer
+	Env        []string
+}
+
+type Engine struct {
+	opts    Options
+	run     store.Run
+	manager *worktree.Manager
+
+	mu   sync.Mutex // serializes task transitions and merges
+	wake chan struct{}
+}
+
+// New loads the run and prepares an engine for it.
+func New(ctx context.Context, opts Options) (*Engine, error) {
+	if opts.Store == nil {
+		return nil, errors.New("execution: store is required")
+	}
+	run, ok, err := opts.Store.GetRun(ctx, opts.RunID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("run %s not found", opts.RunID)
+	}
+	if opts.StateDir == "" {
+		opts.StateDir = config.StateDir()
+	}
+	defaults := config.Defaults("").Run
+	if opts.Config.MaxConcurrency <= 0 {
+		opts.Config.MaxConcurrency = defaults.MaxConcurrency
+	}
+	if opts.Config.MaxAttempts <= 0 {
+		opts.Config.MaxAttempts = defaults.MaxAttempts
+	}
+	if opts.Config.VerifyTimeout <= 0 {
+		opts.Config.VerifyTimeout = defaults.VerifyTimeout
+	}
+	if opts.Config.TurnTimeout <= 0 {
+		opts.Config.TurnTimeout = defaults.TurnTimeout
+	}
+	if opts.Permission == "" {
+		opts.Permission = acpdriver.PermissionDeny
+	}
+	manager, err := worktree.New(ctx, run.Project, opts.StateDir)
+	if err != nil {
+		return nil, err
+	}
+	if run.IntegrationPath == "" {
+		// Runs planned before integration_path was stored.
+		run.IntegrationPath = manager.Root(run.ID) + "/integration"
+	}
+	e := &Engine{opts: opts, run: run, manager: manager, wake: make(chan struct{}, 1)}
+	if e.opts.Turn == nil {
+		e.opts.Turn = e.acpTurn
+	}
+	return e, nil
+}
+
+// Run schedules tasks until none can make progress. It returns the run
+// outcome; a cancelled context interrupts running tasks and returns
+// RunStopped with the context error.
+func (e *Engine) Run(ctx context.Context) (string, error) {
+	if err := e.recover(); err != nil {
+		return "", err
+	}
+	e.setRunStatus(RunRunning)
+
+	done := make(chan string, e.opts.Config.MaxConcurrency)
+	busy := map[string]bool{}
+	for {
+		budget, err := e.budgetLeft()
+		if err != nil {
+			return "", err
+		}
+		if budget && len(busy) < e.opts.Config.MaxConcurrency {
+			for _, a := range e.dispatch(busy, e.opts.Config.MaxConcurrency-len(busy)) {
+				busy[a.agent.Name] = true
+				go func(a assignment) {
+					e.process(ctx, a.task, a.agent)
+					done <- a.agent.Name
+				}(a)
+			}
+		}
+
+		if len(busy) == 0 {
+			outcome := e.outcome(budget)
+			if outcome == RunWaiting && e.opts.WaitForReview {
+				select {
+				case <-e.wake:
+					continue
+				case <-ctx.Done():
+					e.setRunStatus(RunStopped)
+					return RunStopped, ctx.Err()
+				}
+			}
+			e.setRunStatus(outcome)
+			return outcome, nil
+		}
+
+		select {
+		case name := <-done:
+			delete(busy, name)
+		case <-e.wake:
+		case <-ctx.Done():
+			for len(busy) > 0 {
+				delete(busy, <-done)
+			}
+			e.setRunStatus(RunStopped)
+			return RunStopped, ctx.Err()
 		}
 	}
+}
+
+type assignment struct {
+	task  store.Task
+	agent store.RunAgent
+}
+
+// Ready picks up to limit runnable tasks, in plan order, each with a distinct
+// idle worker. A retried task goes back to the worker that attempted it.
+func Ready(tasks []store.Task, agents []store.RunAgent, busy map[string]bool, limit int) []assignment {
+	merged := make(map[string]bool, len(tasks))
+	taken := make(map[string]bool, len(busy))
+	for name := range busy {
+		taken[name] = true
+	}
 	for _, task := range tasks {
+		switch task.Status {
+		case StatusMerged, "done":
+			merged[task.ID] = true
+		case StatusRunning:
+			taken[task.Assignee] = true
+		}
+	}
+
+	var out []assignment
+	for _, task := range tasks {
+		if len(out) >= limit {
+			break
+		}
 		if task.Status != StatusQueued && task.Status != StatusInterrupted {
 			continue
 		}
-		if !depsFinished(task, finished) {
+		if !depsMerged(task, merged) {
 			continue
 		}
 		for _, agent := range agents {
-			if agent.Role == task.Role && agent.Role != "lead" && !busy[agent.Name] {
-				return task, agent, true
+			if agent.Role == "lead" || agent.Role != task.Role || taken[agent.Name] {
+				continue
 			}
+			if task.Assignee != "" && task.Assignee != agent.Name && hasAgent(agents, task.Assignee) {
+				continue
+			}
+			taken[agent.Name] = true
+			out = append(out, assignment{task: task, agent: agent})
+			break
 		}
 	}
-	return store.Task{}, store.RunAgent{}, false
+	return out
 }
 
-func depsFinished(task store.Task, finished map[string]bool) bool {
+func depsMerged(task store.Task, merged map[string]bool) bool {
 	for _, dep := range task.Deps {
-		if !finished[dep] {
+		if !merged[dep] {
 			return false
 		}
 	}
 	return true
 }
 
-// Recover marks tasks left running by a crashed process as interrupted so
-// Next can pick them up again.
-// shortcut: assumes one Switch process drives a run; add run ownership when
-// the run actor lands.
-func Recover(ctx context.Context, state *store.Store, runID string) error {
-	tasks, err := state.TasksForRun(ctx, runID)
+func hasAgent(agents []store.RunAgent, name string) bool {
+	for _, agent := range agents {
+		if agent.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// dispatch marks ready tasks running and gives each one its worktree.
+func (e *Engine) dispatch(busy map[string]bool, limit int) []assignment {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ctx, cancel := saveContext()
+	defer cancel()
+
+	tasks, err := e.opts.Store.TasksForRun(ctx, e.run.ID)
+	if err != nil {
+		return nil
+	}
+	agents, err := e.opts.Store.RunAgents(ctx, e.run.ID)
+	if err != nil {
+		return nil
+	}
+	var started []assignment
+	for _, a := range Ready(tasks, agents, busy, limit) {
+		task := a.task
+		if task.Worktree == "" {
+			wt, err := e.manager.Create(ctx, e.run.ID, "task-"+planID(task.ID), e.run.IntegrationBranch)
+			if err != nil {
+				task.Status = StatusBlocked
+				task.LastError = "create worktree: " + err.Error()
+				e.save(ctx, task, a.agent.Name, task.LastError)
+				continue
+			}
+			task.Worktree, task.Branch = wt.Path, wt.Branch
+		}
+		task.Status = StatusRunning
+		task.Assignee = a.agent.Name
+		task.Attempts++
+		task.LastError = ""
+		if !e.save(ctx, task, a.agent.Name, fmt.Sprintf("attempt %d", task.Attempts)) {
+			continue
+		}
+		started = append(started, assignment{task: task, agent: a.agent})
+	}
+	return started
+}
+
+// recover returns tasks a crashed process left mid-flight to a resumable state.
+// shortcut: assumes one Switch process drives a run; add run ownership (a
+// lock file next to the control socket) before allowing several.
+func (e *Engine) recover() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ctx, cancel := saveContext()
+	defer cancel()
+	tasks, err := e.opts.Store.TasksForRun(ctx, e.run.ID)
 	if err != nil {
 		return err
 	}
 	for _, task := range tasks {
-		if task.Status == StatusRunning {
+		switch task.Status {
+		case StatusRunning, StatusVerifying, StatusReviewing:
 			task.Status = StatusInterrupted
-			if err := state.SaveTask(ctx, task); err != nil {
-				return err
-			}
+		case StatusApproved:
+			// Merging is idempotent, so the user can approve again.
+			task.Status = StatusReview
+		default:
+			continue
 		}
-	}
-	agents, err := state.RunAgents(ctx, runID)
-	if err != nil {
-		return err
-	}
-	for _, agent := range agents {
-		if agent.Status == "busy" {
-			agent.Status = "idle"
-			if err := state.SaveRunAgent(ctx, agent); err != nil {
-				return err
-			}
-		}
+		e.save(ctx, task, task.Assignee, "recovered after restart")
 	}
 	return nil
 }
 
-// RunNext runs the next ready task of the run for one worker turn.
-func RunNext(ctx context.Context, opts Options) (*Result, error) {
-	if err := Recover(ctx, opts.Store, opts.RunID); err != nil {
-		return nil, err
-	}
-	tasks, err := opts.Store.TasksForRun(ctx, opts.RunID)
-	if err != nil {
-		return nil, err
-	}
-	agents, err := opts.Store.RunAgents(ctx, opts.RunID)
-	if err != nil {
-		return nil, err
-	}
-	task, agent, ok := Next(tasks, agents)
-	if !ok {
-		return nil, ErrNoReadyTask
-	}
-	return Run(ctx, opts, task, agent)
-}
-
-// Run executes one task in the agent's worktree and records the outcome. A
-// cancelled context marks the task interrupted and stops the adapter.
-func Run(ctx context.Context, opts Options, task store.Task, agent store.RunAgent) (*Result, error) {
-	task.Status = StatusRunning
-	task.Assignee = agent.Name
-	task.Worktree = agent.Worktree
-	task.Branch = agent.Branch
-	task.Attempts++
-	if err := opts.Store.SaveTask(ctx, task); err != nil {
-		return nil, err
-	}
-	agent.Status = "busy"
-	if err := opts.Store.SaveRunAgent(ctx, agent); err != nil {
-		return nil, err
-	}
-
-	result := &Result{Task: task, Agent: agent}
-	output, err := runWorker(ctx, opts, task, &agent)
-	result.Output = output
-
-	switch {
-	case ctx.Err() != nil:
-		task.Status = StatusInterrupted
-		err = ctx.Err()
-	case err != nil:
-		task.Status = StatusFailed
-	default:
-		task.Status = StatusImplemented
-	}
-	agent.Status = "idle"
-
-	// The run context may be cancelled; still record the outcome.
-	saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (e *Engine) outcome(budget bool) string {
+	ctx, cancel := saveContext()
 	defer cancel()
-	if saveErr := errors.Join(opts.Store.SaveTask(saveCtx, task), opts.Store.SaveRunAgent(saveCtx, agent)); saveErr != nil {
-		err = errors.Join(err, saveErr)
+	tasks, _ := e.opts.Store.TasksForRun(ctx, e.run.ID)
+	all, waiting, pending := true, false, false
+	for _, task := range tasks {
+		switch task.Status {
+		case StatusMerged, "done":
+			continue
+		case StatusReview, StatusApproved, StatusReviewing:
+			waiting = true
+		case StatusQueued, StatusInterrupted:
+			pending = true
+		}
+		all = false
 	}
-	result.Task = task
-	result.Agent = agent
-	return result, err
+	switch {
+	case all:
+		return RunCompleted
+	case waiting:
+		return RunWaiting
+	case pending && !budget:
+		return RunBudget
+	default:
+		return RunBlocked
+	}
 }
 
-func runWorker(ctx context.Context, opts Options, task store.Task, agent *store.RunAgent) (string, error) {
-	spec := acpdriver.Spec{
-		Agent:     agent.Driver,
-		Cwd:       agent.Worktree,
-		Model:     agent.Model,
-		SessionID: agent.SessionID,
-		AgentLogs: opts.AgentLogs,
+func (e *Engine) budgetLeft() (bool, error) {
+	ctx, cancel := saveContext()
+	defer cancel()
+	if max := e.opts.Config.MaxTurns; max > 0 {
+		turns, err := e.opts.Store.CountEvents(ctx, e.run.ID, "turn")
+		if err != nil {
+			return false, err
+		}
+		if turns >= max {
+			return false, nil
+		}
 	}
-	session, err := acpdriver.Open(ctx, spec)
-	if err != nil && spec.SessionID != "" {
-		spec.SessionID = ""
-		session, err = acpdriver.Open(ctx, spec)
+	if max := e.opts.Config.MaxTokens; max > 0 {
+		usage, err := e.opts.Store.RunUsage(ctx, e.run.ID)
+		if err != nil {
+			return false, err
+		}
+		if usage.TotalTokens >= max {
+			return false, nil
+		}
 	}
-	if err != nil {
-		return "", fmt.Errorf("start %s: %w", agent.Name, err)
-	}
-	defer session.Close(context.Background())
-
-	agent.SessionID = session.ID
-	if err := opts.Store.SaveRunAgent(ctx, *agent); err != nil {
-		return "", err
-	}
-
-	return session.RunTurn(ctx, Prompt(task, *agent, opts.Rules), acpdriver.TurnOptions{
-		Permission:   opts.Permission,
-		OnText:       opts.OnText,
-		OnPermission: opts.OnPermission,
-	})
+	return true, nil
 }
 
-// Prompt builds the worker brief for one task.
-func Prompt(task store.Task, agent store.RunAgent, ruleSet rules.Set) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "You are %s, a %s agent in a Switch run.\n", agent.Name, agent.Role)
-	fmt.Fprintf(&b, "Work only inside this git worktree: %s (branch %s).\n\n", agent.Worktree, agent.Branch)
-	fmt.Fprintf(&b, "Task: %s\n\n%s\n", task.Title, task.Brief)
-	writeList(&b, "Files in scope", task.Files)
-	writeList(&b, "Acceptance criteria", task.Acceptance)
-	writeList(&b, "Verification commands (Switch runs these after you finish; run them yourself first)", task.Verify)
-	if !ruleSet.Empty() {
-		b.WriteString("\nOperating rules:\n")
-		b.WriteString(ruleSet.Text())
-		b.WriteString("\n")
+// save persists a transition, logs it, and notifies the UI. Callers hold mu or
+// own the task exclusively.
+func (e *Engine) save(ctx context.Context, task store.Task, agent, message string) bool {
+	if err := e.opts.Store.SaveTask(ctx, task); err != nil {
+		return false
 	}
-	b.WriteString("\nDo not commit, push, merge, or switch branches; Switch integrates approved work.\n")
-	b.WriteString("When you are done, reply with a short summary of what you changed and anything left open.\n")
-	return b.String()
+	text := task.Status
+	if message != "" {
+		text += ": " + message
+	}
+	e.log(ctx, task.ID, agent, "status", text)
+	return true
 }
 
-func writeList(b *strings.Builder, title string, items []string) {
-	if len(items) == 0 {
-		return
+func (e *Engine) log(ctx context.Context, taskID, agent, kind, message string) {
+	_ = e.opts.Store.AddEvent(ctx, store.Event{RunID: e.run.ID, TaskID: taskID, Agent: agent, Kind: kind, Message: message})
+	if e.opts.OnChange != nil {
+		e.opts.OnChange()
 	}
-	fmt.Fprintf(b, "\n%s:\n", title)
-	for _, item := range items {
-		fmt.Fprintf(b, "- %s\n", item)
+}
+
+func (e *Engine) setRunStatus(status string) {
+	ctx, cancel := saveContext()
+	defer cancel()
+	_ = e.opts.Store.SetRunStatus(ctx, e.run.ID, status)
+	e.log(ctx, "", "", "run", status)
+}
+
+func (e *Engine) signal() {
+	select {
+	case e.wake <- struct{}{}:
+	default:
 	}
+}
+
+// saveContext outlives a cancelled run so outcomes are still recorded.
+func saveContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 10*time.Second)
+}
+
+// planID strips the run prefix that planning adds to task IDs.
+func planID(id string) string {
+	for i := len(id) - 1; i >= 0; i-- {
+		if id[i] == ':' {
+			return id[i+1:]
+		}
+	}
+	return id
 }
