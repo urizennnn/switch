@@ -1,6 +1,6 @@
 # Switch
 
-> **⚠️ Early development — Phase 2 planning foundation complete.**
+> **⚠️ Early development — the v1 execution loop works end to end (plan → run → verify → review → approve → merge). Expect rough edges.**
 
 Switch is a terminal orchestrator for a team of existing coding agents. It does not call models itself. It launches vendor CLIs as subprocesses, gives each one a role and an isolated workspace, and lets exactly one agent — the lead — plan, delegate, review, and talk to you. You converse only with the lead.
 
@@ -10,16 +10,18 @@ The design is vendor-agnostic and built on the [Agent Client Protocol](https://a
 
 | Layer | State |
 |---|---|
-| ACP driver + probe | Working across OpenCode, Codex, and Claude |
-| Session create / prompt / resume | Working |
-| Permission allow / deny bridge | Working (verified with Claude; interactive ask path implemented) |
-| Capability report | Working |
-| TUI chat shell | Wired to the engine with streaming, history, permissions, and resume |
-| TUI slash commands | `/plan`, `/run`, `/doctor`, `/init`, `/rules`, `/session`, `/lead`, `/adapters`, `/new` |
-| Config, rules, SQLite state | Working (TUI `/init`, `/doctor`; auto-init on first run) |
-| Plan generation + run worktrees | Working (TUI `/plan`, lead-generated or `--file`) |
-| Single-task execution | Working (TUI `/run` dispatches the next ready task to a worker) |
-| Scheduler, verification, review/merge | Not started (Phase 2) |
+| ACP driver + probe | Working across OpenCode, Codex, and Claude; OpenClaw untested |
+| TUI chat with the lead | Streaming, history, permissions, resume, lead switching |
+| Config, rules, SQLite state | Working; global/project/local plus role and task rules |
+| Planning | Lead-generated or imported plans become runs with an integration branch |
+| Scheduler | Ready tasks run in parallel up to `max_concurrency`, one per worker |
+| Verification | Task `verify` commands run in the task worktree; evidence is stored |
+| Lead review + approval | The lead reviews each verified diff; you approve or reject |
+| Merge queue | Serialized merges into the integration branch, then integration verification |
+| Control plane | Per-run Unix socket, agent CLI, and MCP bridge offered to every agent |
+| Reliability | Crash recovery, orphan adapter cleanup, audit log, token usage, budgets |
+| Headless | `switch __control run|tasks|approve|reject|retry|diff|log` |
+| Packaging | GoReleaser config and GitHub Actions CI/release workflows |
 
 See [`docs/architecture.md`](docs/architecture.md) for the full architecture, language choice, phases, and risks.
 
@@ -48,19 +50,51 @@ go build -o switch .
 
 | Command | Purpose |
 |---|---|
-| `/plan <goal>` | Ask the lead to plan and create a run with worktrees |
+| `/plan <goal>` | Ask the lead to plan and create a run |
 | `/plan --file <path>` | Import a plan JSON file |
-| `/run` | Dispatch the next ready task to an idle worker; esc cancels, `/run` again resumes |
+| `/run` | Start or resume the run; workers stream into the run log |
+| `/stop` | Stop the run; running tasks become `interrupted` and `/run` resumes them |
+| `/tasks` | Task list: enter for details, `a` approve, `r` reject, `d` diff, `t` retry |
+| `/review` | The task list, opened at the first task waiting for approval |
+| `/approve <task>` | Merge a reviewed task into the integration branch |
+| `/reject <task> <reason>` | Send a task back to its worker with your reason |
+| `/retry <task>` | Requeue a blocked or interrupted task with a fresh attempt budget |
+| `/diff <task>` | Show a task's change against the integration branch |
+| `/agents` | Run agents, what each is doing, last errors, and token usage |
+| `/log` | The run's audit log |
 | `/doctor` | Check config, rules, adapters, and state |
 | `/init` | Create `.switch` config and rules explicitly |
 | `/rules` | Show effective global/project rules |
 | `/session` | Show the current agent session |
 | `/lead <agent>` | Choose which configured agent leads and persist it |
-| `/adapters` | Install or uninstall ACP adapters |
+| `/adapters` | Install or uninstall ACP adapters (not during a run) |
 | `/new` | Start a new agent session |
 | `/home` | Return to the dashboard |
 | `/help` | Show commands |
 | `/quit` | Exit |
+
+### How a run works
+
+1. `/plan` asks the lead for a JSON plan (or imports one) and creates a run
+   with an integration branch `switch/<run>/integration` off your `HEAD`.
+2. `/run` dispatches every ready task (dependencies merged, a free worker of
+   the task's role) up to `max_concurrency`. Each task gets its own worktree,
+   branched from the integration branch, so it sees its dependencies' work.
+3. When the worker's turn ends, Switch runs the task's `verify` commands. A
+   failure goes back to the same worker with the evidence, up to
+   `max_attempts`; then the task is `blocked`.
+4. Switch commits the change on the task branch, and the lead reviews the diff
+   and evidence (`lead_review`). A lead REJECT sends it back like a failure.
+5. The task waits in `review` for you. `/approve` merges it into the
+   integration branch and re-runs verification there. A conflict blocks the
+   task; a failed integration check undoes that task's merge and blocks it.
+   Dependents start once their dependencies are merged.
+6. When every task is merged, the run is `completed`. Switch never pushes and
+   never merges into your branches; merge the integration branch yourself.
+
+Chat with the lead stays available during a run. Run settings live under
+`[run]` in `.switch/config.toml`; role and task rules in
+`.switch/rules/roles/<role>.md` and `.switch/rules/tasks/<task>.md`.
 
 The TUI uses one design system across the dashboard, conversation, modals, and
 command palette: shared colors, panels, section labels, input, and status bars.
@@ -76,15 +110,26 @@ does not start with `/` is sent to the agent.
 
 ### Internal control
 
-There are no user-facing CLI subcommands. The TUI is the product surface.
-The unadvertised `__control` entry point remains for agents, automation, and
-tests until the Unix-socket control plane lands:
+The TUI is the product surface. The unadvertised `__control` entry point is
+for agents, automation, and tests; the run commands drive the same engine as
+the TUI:
 
 ```bash
-./switch __control doctor
 ./switch __control plan --file plan.json
+./switch __control run --permission allow   # until tasks wait for review
+./switch __control tasks
+./switch __control diff <task>
+./switch __control approve <task>           # or: reject <task> <reason>, retry <task>
+./switch __control log
+./switch __control doctor
 ./switch __control probe --list
 ```
+
+Agents reach the run through the control plane: every agent session is
+offered a `switch` MCP server (`switch_task`, `switch_progress`,
+`switch_complete`, `switch_block`, and lead-only `switch_delegate`), and the
+same calls work from a shell as `$SWITCH_BIN __control agent <method> <message>`.
+Only you approve and merge; agents are refused.
 
 Resume a probe session by passing the session ID printed by a previous run:
 
@@ -136,11 +181,11 @@ Switch runs a modular Go monolith. The engine owns runs, tasks, agents, rules, w
 
 1. **Phase 0 — ACP spine** *(done)*: probe OpenCode, Codex, Claude; capability matrix; permissions; resume.
 2. **Phase 1 — Engine + chat shell** *(done)*: config, SQLite state, session manager, TUI chat, `/rules`, doctor.
-3. **Phase 2 — Lead + workers**: plan schema, control socket/CLI/MCP bridge, scheduler, worktrees, agent view.
-4. **Phase 3 — Review + integration**: verification, diff review, merge queue, retries, budgets.
-5. **Phase 4 — Rules + context**: global/project/role rules, effective-rules view, product context docs.
-6. **Phase 5 — OpenClaw + ecosystem**: ACP bridge, adapter install/doctor, capability fallbacks.
-7. **Phase 6 — Reliability + distribution**: crash recovery, headless `run`, daemon/detach, packaging.
+3. **Phase 2 — Lead + workers** *(done)*: plan schema, control socket/CLI/MCP bridge, scheduler, worktrees, agent view.
+4. **Phase 3 — Review + integration** *(done)*: verification, diff review, merge queue, retries, budgets.
+5. **Phase 4 — Rules + context** *(done)*: global/project/local/role/task rules.
+6. **Phase 5 — OpenClaw + ecosystem** *(partial)*: adapter install/doctor done; OpenClaw is defined but unverified.
+7. **Phase 6 — Reliability + distribution** *(done for v1)*: crash recovery, orphan cleanup, headless run, packaging. Daemon/detach mode is not planned for v1.
 
 ## Development
 
@@ -159,18 +204,24 @@ The probe implementation lives in:
 - `internal/plan/` — plan schema and DAG validation
 - `internal/worktree/` — git worktree creation and cleanup
 - `internal/plancli/` — internal `plan` command; the TUI calls `internal/planning` directly
-- `internal/execution/` — dispatches one ready task to a worker in its agent worktree
+- `internal/execution/` — run engine: scheduler, worker turns, verification, lead review, merge queue
+- `internal/verify/` — verification command runner and evidence
+- `internal/control/` — control socket, agent CLI, and MCP bridge
+- `internal/runcli/` — headless run and task commands
 
 The `tui/` package is wired to the chat engine. `switch` opens the TUI; the hidden `__control` commands use the same engine for automation.
 
 ## Known limitations
 
-- The TUI supports one resumable agent chat.
-- `/run` executes one task per invocation; there is no scheduler, concurrency, or verification yet. Finished tasks stop at `implemented` until the verification runner exists, so their dependents stay blocked.
+- One TUI chat with the lead per project; it spans lead switches, which are marked in the history.
+- One Switch process should drive a run at a time; nothing enforces it yet.
+- Headless `run` cannot ask for permissions: pass `--permission allow` or `deny`.
+- Lead review needs a lead in the run; without one, review is left to you.
 - OpenClaw is untested because it is not installed on this machine.
 - OpenCode's default model may hit provider privacy settings; use `--model` to choose a permitted model.
 - Claude adapter hooks/plugins can add stderr noise; use `--agent-logs` only when debugging.
 - The ACP SDK is v0.x; it is pinned and wrapped behind the driver boundary.
+- Windows is out of scope for v1.
 
 ## License
 

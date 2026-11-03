@@ -210,11 +210,13 @@ func Open(ctx context.Context, spec Spec) (*Session, error) {
 	}
 	session.cmd = cmd
 	session.stdin = stdin
+	untrack := track(cmd.Process.Pid, command)
 
 	waitCh := make(chan error, 1)
 	session.waitCh = waitCh
 	go func() {
 		err := cmd.Wait()
+		untrack()
 		session.exitMu.Lock()
 		session.exitErr = err
 		session.exitMu.Unlock()

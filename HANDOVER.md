@@ -17,7 +17,7 @@ Phases 0 and 1 are complete, and the Phase 2 planning foundation is working. The
 4. merge approved work into the run integration branch,
 5. expose the same operations to agents through the control plane.
 
-**Update 2026-11-03:** Milestone A (single-task execution) is done: `/run` dispatches the next ready task to a worker in its agent worktree, streams output, persists state and the worker session, and supports cancel/resume. Items 5.1, 5.2, 5.4, and 5.7 are resolved. The biggest gap is now the **scheduler and verification runner** (Milestones B and C): finished tasks stop at `implemented`, so dependents stay blocked.
+**Update 2026-11-03 (later):** Milestones A–H are implemented and committed on `master`. The full loop works end to end and was verified live with OpenCode in the TUI and headless: plan → `/run` (parallel scheduler) → verification → commit → lead review → `/approve` → merge into the integration branch → integration verification → dependents dispatched → run `completed`. Workers report through the control plane over MCP. What remains is listed in section 11.
 
 ---
 
@@ -105,33 +105,9 @@ Manual TUI smoke tests covered:
 
 ---
 
-## 3. Uncommitted handoff state
+## 3. Handoff state
 
-Last committed work is `2f038f8`. The following files are modified or new and must be reviewed before the next commit:
-
-| File | Purpose |
-|---|---|
-| `main.go` | Lazy TUI startup; resolve stored lead |
-| `tui/model.go` | Background connection, connection context, lead fields, shutdown persistence |
-| `tui/update.go` | Lazy connection, optimistic lead switch, immediate persistence, adapter actions |
-| `tui/view.go` | Connecting state, lead-aware overview/status, new sidebar states |
-| `tui/design.go` | Shared palette, panels, modal styling |
-| `tui/commands.go` | Command palette entries |
-| `tui/leadpicker.go` | Configured-agent lead picker |
-| `tui/adapterpicker.go` | Adapter management modal |
-| `tui/leadpersist_test.go` | Immediate lead persistence test |
-| `internal/driver/acpdriver/managed.go` | Managed adapter install/uninstall |
-| `internal/driver/acpdriver/managed_test.go` | Adapter manager tests |
-| `internal/planning/planning.go` | Streaming callback for plan output |
-| `README.md` | TUI commands and current status |
-| `docs/architecture.md` | Phase 2 status updates, adapter manager, execution model |
-| `internal/execution/` | Milestone A: `Next`, `Recover`, `RunNext`, `Run`, worker prompt, tests |
-| `internal/driver/acpdriver/turn.go` | Shared `Session.RunTurn` and `PermissionRequest.Resolve` used by planning and execution |
-| `internal/chat/chat.go` | `SwitchAgent`/`NewSession` return a new `*Chat` instead of mutating from a goroutine |
-| `tui/job.go` | Shared background-job stream for `/plan` and `/run` (esc cancels, permission modal) |
-| `tui/job_test.go`, `main_test.go` | `/run` and worker-permission routing; configured-agent-only lead |
-
-Also present but untracked: `.switch/` (project config and rules generated during development). Decide whether this belongs in the repository, should be ignored, or should remain local-only.
+All work is committed on `master`. Only `.switch/` (this repo's own generated project config and rules) is untracked; decide whether it belongs in the repository.
 
 ---
 
@@ -160,8 +136,12 @@ Current package map:
 | `internal/store` | SQLite migrations and queries |
 | `internal/plan` | Plan schema and validation |
 | `internal/planning` | Plan generation/import and run provisioning |
-| `internal/worktree` | Git worktree creation/removal |
+| `internal/worktree` | Git worktrees plus commit, diff, merge, reset |
 | `internal/doctor` | Readiness diagnostics |
+| `internal/execution` | Run engine: scheduler, worker turns, verification, lead review, merge queue |
+| `internal/verify` | Verification command runner and evidence |
+| `internal/control` | Control socket, agent CLI, MCP bridge |
+| `internal/runcli` | Headless run and task commands |
 | `tui` | User-facing Bubble Tea application |
 
 **Deliberate constraints**
@@ -189,9 +169,9 @@ The `/lead` picker is configured-only, but the `/lead <name>` fallback in `tui/u
 - Remove or explicitly migrate adapter names stored by older builds.
 - Add a test that a bare adapter name cannot become the lead.
 
-### 5.2 Decide worktree ownership for tasks — DECIDED: serialize per agent
+### 5.2 Decide worktree ownership for tasks — DECIDED: one worktree per task
 
-Each run agent keeps its one worktree; `execution.Next` never gives an agent a second task while one is `running`. Revisit if one agent needs parallel tasks.
+First settled as one worktree per agent, then changed once merging existed: each task gets its own worktree branched from the integration branch at first dispatch, so dependents see merged work and rejected work never leaks between tasks. A worker still runs one task at a time. See `docs/architecture.md` section 18.
 
 `/plan` currently creates one worktree per configured agent. Tasks have `branch` and `worktree` columns, but assignment is not implemented. Two concurrent tasks assigned to the same agent would share a worktree and collide.
 
@@ -202,7 +182,9 @@ Choose one:
 
 The architecture currently says "one worktree per agent/task", so this needs to be settled before the scheduler.
 
-### 5.3 Chat history is not scoped by agent
+### 5.3 Chat history is not scoped by agent — DECIDED: one project conversation
+
+The conversation spans leads; each lead switch is recorded as a system line in the history. Per-agent transcripts remain possible later.
 
 `chat_sessions` is keyed only by project, and `chat_messages` has no agent column. Switching leads overwrites the single session and the conversation view may show messages from a previous agent. Decide whether to:
 
@@ -213,11 +195,11 @@ The architecture currently says "one worktree per agent/task", so this needs to 
 
 If the lead adapter is unavailable, the TUI shows an error but the input path is effectively blocked until `ctrl+c`. Add a retry key or a `/reconnect` path.
 
-### 5.5 Cold-start latency remains
+### 5.5 Cold-start latency remains — OPEN (not in v1)
 
 Lead switching is visually immediate, but a new ACP process still starts in the background. `/adapters` can install Codex/Claude globally to avoid `npx`; a future improvement is prewarming one process per adapter or a session/agent pool.
 
-### 5.6 Legacy code cleanup
+### 5.6 Legacy code cleanup — DONE (packages deleted; history keeps them)
 
 These tracked packages are not imported by the current product path:
 
@@ -270,6 +252,8 @@ Tasks:
 
 ### Milestone B — DAG scheduler and concurrency
 
+**Status:** DONE. `internal/execution` engine; `max_concurrency`, retries to the same worker, `max_attempts`, recovery of interrupted tasks; tests in `internal/execution/execution_test.go`.
+
 **Goal:** run multiple tasks safely.
 
 Tasks:
@@ -294,6 +278,8 @@ Tasks:
 
 ### Milestone C — Verification runner
 
+**Status:** DONE. `internal/verify`; evidence in `verifications`; failures go back to the worker with output; timeouts kill the process group.
+
 **Goal:** never trust a worker's claim of completion.
 
 Tasks:
@@ -315,6 +301,8 @@ Tasks:
 ---
 
 ### Milestone D — Lead review, merge queue, and integration verification
+
+**Status:** DONE. Commit/diff/merge/reset in `internal/worktree`; lead APPROVE/REJECT; `/approve` and `/reject`; serialized merges, conflicts block, failed integration checks undo the merge; worktrees removed after merge; nothing is pushed.
 
 **Goal:** safely integrate approved work.
 
@@ -340,6 +328,8 @@ Tasks:
 
 ### Milestone E — Control plane, agent CLI, and MCP bridge
 
+**Status:** DONE, with one deviation: tokens are per turn and in memory, passed by env and MCP config, instead of `.switch-run` files (which a worker could commit). `switch __control agent` and `switch __control mcp`; role checks; verified live over MCP with OpenCode. Permission responses are not exposed over the socket.
+
 **Goal:** let agents and automation interact with the engine without using the TUI.
 
 Tasks:
@@ -363,6 +353,8 @@ Tasks:
 
 ### Milestone F — Run, task, and agent TUI views
 
+**Status:** DONE. Run log panel, sidebar task counts and per-agent task, `/tasks` and `/review` picker (details, approve, reject, diff, retry), `/agents`, `/log`, `/stop`.
+
 **Goal:** make execution observable.
 
 Tasks:
@@ -385,6 +377,8 @@ Tasks:
 
 ### Milestone G — Rules and context scopes
 
+**Status:** DONE. `rules.Scoped`: global → project → local → role → task; lead-only rules in `roles/lead.md`; tests for precedence, missing files, and path traversal. The effective rules per role are visible only in prompts; a `/rules <role>` view is not built.
+
 **Goal:** apply the right instructions to the right role and task.
 
 Tasks:
@@ -403,6 +397,8 @@ Tasks:
 ---
 
 ### Milestone H — Reliability, headless operation, and distribution
+
+**Status:** DONE for v1: crash recovery, orphan adapter cleanup (`<state>/pids`), audit log (`events`, `/log`), token usage (`usage`, `/agents`), `max_turns`/`max_tokens` budgets, headless `__control run|tasks|approve|reject|retry|diff|log`, GoReleaser config, CI and release workflows. Not done: daemon/detach mode (not planned for v1), OpenClaw verification (not installed), cost budgets (adapters report cumulative cost only).
 
 **Goal:** make Switch usable beyond a single interactive session.
 
@@ -470,15 +466,16 @@ go vet ./...
 
 Manual TUI smoke test:
 
-1. Start `./switch` in a git repository.
-2. Confirm the shell appears before the lead connects.
-3. Send a prompt and confirm streaming plus final status.
-4. Open `/lead`, switch to another configured agent, and confirm the header/sidebar update immediately.
-5. Quit during the switch; restart and confirm the new lead is still selected.
-6. Open `/adapters`; confirm the modal, confirmation text, and external-management behavior.
-7. Run `/plan --file <plan.json>` and confirm run, agent worktrees, and queued tasks.
-8. Confirm no worker has been dispatched yet (current limitation).
-9. Quit and confirm no orphan adapter processes remain.
+1. Start `./switch` in a git repository; the shell appears before the lead connects.
+2. Send a prompt; confirm streaming and final status.
+3. `/lead` to another configured agent; the switch is noted in the conversation and survives a restart.
+4. `/adapters`: modal and confirmation text; refused while a run is active.
+5. `/plan --file <plan.json>` with two dependent tasks, then `/run`.
+6. Watch the run log; the first task reaches `review` after verification and lead review.
+7. `/review`, `d` for the diff, `a` to approve; the dependent task starts on its own.
+8. Approve the second task; the run reports completed and the integration branch has both merges.
+9. `/stop` mid-turn marks the task `interrupted`; `/run` resumes it.
+10. Quit (also mid-run) and confirm no `opencode acp` / adapter processes remain.
 
 Useful state checks:
 
@@ -490,32 +487,49 @@ sqlite3 ~/.local/state/switch/switch.db \
   "select id, status, goal from runs order by created_at desc limit 5;"
 
 sqlite3 ~/.local/state/switch/switch.db \
-  "select id, title, status, assignee from tasks order by rowid desc limit 20;"
+  "select id, title, status, assignee, attempts from tasks order by rowid desc limit 20;"
+
+sqlite3 ~/.local/state/switch/switch.db \
+  "select kind, agent, message from events order by id desc limit 30;"
 ```
 
 ---
 
 ## 9. Handoff checklist
 
-- [ ] Current diff reviewed and intentionally committed or left local.
+- [x] Current diff reviewed and committed.
 - [ ] `.switch/` tracking decision made.
-- [ ] `go build ./...`, `go test ./...`, `go vet ./...` pass.
-- [ ] TUI smoke test passes in a real terminal.
-- [ ] Lead persistence verified across restart.
-- [ ] Adapter install/uninstall flow verified.
-- [ ] Architecture docs reconciled with implementation.
-- [ ] Worktree ownership decision recorded.
-- [ ] Next milestone (single-task execution) has an owner and acceptance tests.
-- [ ] No auto-push or auto-merge behavior was introduced.
+- [x] `go build ./...`, `go test -race ./...`, `go vet ./...` pass.
+- [x] TUI smoke test passes in a real terminal (tmux, OpenCode).
+- [x] Lead persistence verified across restart.
+- [ ] Adapter install/uninstall flow verified end to end (confirmation verified; no install was run).
+- [x] Architecture docs reconciled with implementation.
+- [x] Worktree ownership decision recorded.
+- [x] No auto-push or auto-merge behavior: merges need `/approve`; nothing pushes.
 
 ---
 
 ## 10. Open decisions
 
-1. **Worktree model:** decided: one per agent, tasks serialized (see 5.2).
+1. **Worktree model:** decided, one per task (5.2).
 2. **Lead persistence scope:** per project (current) or global fallback?
-3. **Conversation model:** one shared project transcript or per-agent transcripts?
-4. **Run start:** explicit `/run` (current); revisit with the scheduler.
-5. **Control plane timing:** before or after verification/review is stable?
-6. **OpenClaw:** support now or defer until after the core execution loop?
-7. **Legacy packages:** delete now or keep for reference until v1?
+3. **Conversation model:** decided, one shared project transcript with lead switches marked (5.3).
+4. **Run start:** explicit `/run`.
+5. **Control plane timing:** done after verification/review.
+6. **OpenClaw:** defined, unverified; verify when it can be installed.
+7. **Legacy packages:** deleted.
+8. **`.switch/` in this repo:** commit, ignore, or keep local?
+9. **Merging the integration branch into the user's branch:** today the user merges it by hand. A `/merge-run` command with explicit confirmation is a possible follow-up.
+
+---
+
+## 11. What is left
+
+- Daemon/detach mode, if still wanted.
+- Run ownership (a lock) so two Switch processes cannot drive one run.
+- An effective-rules view per role/task (`/rules <role>`).
+- Answering worker permission requests over the control socket for headless runs (headless is allow/deny only).
+- Adapter prewarming for cold-start latency.
+- OpenClaw verification; a real npm install/uninstall through `/adapters`.
+- Merging or pushing the completed integration branch is deliberately manual.
+

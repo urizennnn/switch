@@ -151,6 +151,9 @@ func (m model) initialTranscript() string {
 				b.WriteString("  ")
 				b.WriteString(textStyle.Render(message.Content))
 				b.WriteString("\n\n")
+			case "system":
+				b.WriteString(systemStyle.Render(message.Content))
+				b.WriteString("\n\n")
 			}
 		}
 	}

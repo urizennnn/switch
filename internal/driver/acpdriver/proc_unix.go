@@ -18,3 +18,15 @@ func configureProcess(cmd *exec.Cmd) {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 }
+
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
+}
+
+func killGroup(pid int) error {
+	return syscall.Kill(-pid, syscall.SIGKILL)
+}

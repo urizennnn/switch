@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/urizennnn/switch/internal/chatcli"
 	"github.com/urizennnn/switch/internal/config"
 	controlplane "github.com/urizennnn/switch/internal/control"
 	"github.com/urizennnn/switch/internal/doctor"
+	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/initcmd"
 	"github.com/urizennnn/switch/internal/plancli"
 	"github.com/urizennnn/switch/internal/probe"
@@ -22,6 +24,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) < 3 || os.Args[1] != "__control" || (os.Args[2] != "mcp" && os.Args[2] != "agent") {
+		trackAdapters()
+	}
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "__control":
@@ -41,6 +46,16 @@ func main() {
 	if err := runTUI(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// trackAdapters stops adapters a crashed Switch left running, then records
+// the ones this process starts.
+func trackAdapters() {
+	dir := filepath.Join(config.StateDir(), "pids")
+	if n, err := acpdriver.ReapOrphans(dir); err == nil && n > 0 {
+		fmt.Fprintf(os.Stderr, "switch: stopped %d adapter process(es) left by a previous crash\n", n)
+	}
+	_ = acpdriver.TrackProcesses(dir)
 }
 
 // control is the internal, unadvertised entry point used by agents,

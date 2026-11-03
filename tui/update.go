@@ -460,6 +460,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lead = msg.agent
 		m.status = msg.status
 		_ = m.persistLead(msg.agent.Name)
+		// One project conversation spans leads; mark where each one takes over.
+		note := fmt.Sprintf("%s (%s) is now the lead", msg.agent.Name, msg.agent.Driver)
+		m.appendSystem(note)
+		m.refreshViewport()
+		_ = m.store.AppendMessage(m.ctx, m.chat.Project, "system", note)
 		m.refreshDashboard()
 		m.setModal("lead", fmt.Sprintf("%s is now the lead (%s)", msg.agent.Name, msg.agent.Driver))
 		return m, waitForActivity(m.chat.Session, m.gen)

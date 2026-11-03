@@ -1,0 +1,22 @@
+version: 2
+
+builds:
+  - main: .
+    binary: switch
+    env:
+      - CGO_ENABLED=0
+    # Windows is out of scope for v1.
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X github.com/urizennnn/switch/internal/version.Version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "switch_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc

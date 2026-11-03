@@ -14,7 +14,7 @@ Scope: v1 — git repositories, one lead + N workers, OpenCode / Codex / Claude 
 | Lead behavior | Plan and review only; does not implement |
 | First vendors | OpenCode, Codex, Claude Code |
 | Lead | Exactly one per run; the only agent the user converses with |
-| Isolation | One git worktree per run agent; an agent's tasks run serially in it |
+| Isolation | One git worktree per task, branched from the run integration branch |
 | Integration | Serialized merge queue into a run integration branch |
 | Rules | Global, project, project-local, role, task scopes |
 | Language | Go 1.26.2+ (Go 1.27 toolchain used locally) |
@@ -575,29 +575,103 @@ Configured agents default to one lead plus two builders. Projects created by
 first run get three OpenCode agents; edit `.switch/config.toml` to mix
 drivers/models.
 
-Not yet implemented:
+Superseded by section 18.
 
-- Scheduler, concurrency, and retries (one task per `/run` today)
-- Verification runner, lead review, and merge queue
-- Control socket, agent-facing CLI, and MCP bridge
-- Agent/task TUI views
+---
 
-### Single-task execution (2026-11-03)
+## 18. Execution engine (2026-11-03)
 
-`internal/execution` and TUI `/run` dispatch one task end to end:
+Phases 2–4 and the v1 part of Phase 6 are implemented. Packages:
 
-- `Next` picks the first `queued` or `interrupted` task, in plan order, whose
-  dependencies are `done`/`approved`/`merged` and whose role has a worker
-  with no running task. The lead never receives tasks.
-- **Worktree model:** each run agent keeps the single worktree created by
-  `/plan`; tasks for the same agent are serialized. Per-task worktrees can
-  come later if parallelism within one agent is needed.
-- The worker prompt carries the brief, file scope, acceptance criteria,
-  verification commands, effective rules, and "do not commit, push, or merge".
-- The worker session resumes from `run_agents.session_id` when possible.
-- Task states: `queued → running → implemented | failed | interrupted`.
-  `implemented` waits for the verification runner (Milestone C).
-- Esc cancels the worker and marks the task `interrupted`; the adapter is
-  reaped. Tasks left `running` by a crash become `interrupted` on the next
-  `/run`.
-- Worker permission requests use the same TUI modal as the chat lead.
+| Package | Responsibility |
+|---|---|
+| `internal/execution` | Run engine: scheduler, worker turns, verification, lead review, merge queue |
+| `internal/verify` | Runs `verify` commands (`sh -c`, per-command timeout, process-group kill) |
+| `internal/worktree` | Worktrees plus commit, diff, merge-base, merge (abort on conflict), reset |
+| `internal/control` | Per-run Unix socket, agent CLI, MCP stdio bridge |
+| `internal/runcli` | Headless `__control run|tasks|approve|reject|retry|diff|log` |
+
+### Task lifecycle
+
+| From | Event | To |
+|---|---|---|
+| `queued`, `interrupted` | dispatched to a worker | `running` |
+| `running` | turn ends | `verifying` |
+| `running` | worker called `block` | `blocked` |
+| `verifying` | checks pass, change committed | `reviewing` (or `review` without lead review) |
+| `verifying` | checks fail | `queued` with feedback, or `blocked` at `max_attempts` |
+| `reviewing` | lead APPROVE or no verdict | `review` |
+| `reviewing` | lead REJECT | `queued` with feedback, or `blocked` |
+| `review` | user `/approve` | `approved` → `merged` |
+| `review` | user `/reject <reason>` | `queued` with feedback, or `blocked` |
+| `approved` | merge conflict or integration check fails | `blocked` |
+| `blocked`, `interrupted` | user `/retry` | `queued` (attempts reset, any worker) |
+| any active state | run cancelled | `interrupted` |
+
+- **Readiness:** a task runs when every dependency is `merged` and a worker
+  of its role is free. Each worker runs one task at a time; a retry goes back
+  to the worker that attempted it. The lead never takes tasks.
+- **Worktrees:** each task gets `switch/<run>/task-<id>`, branched from the
+  integration branch at first dispatch, so dependents see merged work and a
+  rejected change never reaches another task. This replaces the earlier
+  one-worktree-per-agent model. Merged task worktrees are removed; branches
+  stay.
+- **Transitions** are serialized by one mutex in the engine (the run actor);
+  worker turns, verification, and reviews run concurrently.
+- **Verification** results are stored per attempt (`verifications`), both in
+  the task worktree and after merge (`scope = integration`).
+- **Lead review** gets the diff against the merge base, the evidence, and the
+  worker summary, and must answer APPROVE or REJECT. Only REJECT is acted on;
+  the user always makes the merge decision.
+- **Merging** is `git merge --no-ff` into the integration worktree. Conflicts
+  abort and block the task. A failed integration check resets the
+  integration branch to its pre-merge commit and blocks the task. Switch
+  never pushes and never touches the user's branches.
+- **Budgets:** `max_turns` (worker and review turns per run) and
+  `max_tokens` stop dispatching; `max_attempts` bounds each task.
+- **Recovery:** on start, `running`/`verifying`/`reviewing` tasks become
+  `interrupted` and `approved` returns to `review` (merging is idempotent).
+  Adapter process groups are recorded under `<state>/pids`; a later start
+  kills those whose owning Switch process is gone, after checking that the
+  PID still runs the recorded command.
+
+### Control plane
+
+- Socket: `<state>/runs/<id8>/control.sock`, mode `0600` in a `0700`
+  directory; a short temp path is used when that exceeds the Unix socket
+  limit.
+- Each agent turn gets a fresh random token, held in memory only (no
+  `.switch-run` file, so nothing can be committed by accident). The token
+  maps to the agent, its role, and its task.
+- Every session is offered the MCP bridge through ACP `mcpServers`, and
+  `SWITCH_SOCKET`, `SWITCH_TOKEN`, and `SWITCH_BIN` are set in the adapter's
+  environment for `$SWITCH_BIN __control agent <method>`.
+- Methods: `whoami`, `task`/`claim`, `progress`, `complete` (worker, own
+  task), `block` (worker, own task; the task is blocked instead of
+  verified), `delegate` (lead only; adds a queued task). `approve`/`merge`
+  are refused for every agent.
+- Each connection is handled independently; a dropped connection never
+  affects the run.
+
+### Rules
+
+Precedence is global → project → local → role → task. Role rules are
+`.switch/rules/roles/<role>.md` (lead-only guidance goes in `lead.md`), task
+rules `.switch/rules/tasks/<task-id>.md`. Worker and review prompts use
+`rules.Scoped`, which rejects task IDs that would escape the rules directory.
+
+### State added
+
+`verifications`, `events` (audit log), and `usage` (tokens per turn; the
+adapter-reported session cost goes to the audit log because it is
+cumulative). `tasks` gained `session_id`, `commit_sha`, `feedback`, `review`,
+`last_error`, `summary`; `runs` gained `integration_path`. Columns are added
+in place for databases created by older builds.
+
+### Not in v1
+
+- Daemon/detach mode; the TUI or a headless `run` must stay open while a run
+  executes.
+- Several Switch processes driving one run.
+- OpenClaw verification (not installed on the development machine).
+- Adapter prewarming to hide cold-start latency.
