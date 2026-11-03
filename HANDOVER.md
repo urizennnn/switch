@@ -528,6 +528,6 @@ sqlite3 ~/.local/state/switch/switch.db \
 - An effective-rules view per role/task (`/rules <role>`).
 - Answering worker permission requests over the control socket for headless runs (headless is allow/deny only).
 - Adapter prewarming for cold-start latency.
-- OpenClaw against a hosted model provider (optional): verified end to end, headless and in the TUI, with a scripted local model, which the user accepted. To check a real provider, run `openclaw onboard`, start `openclaw gateway`, and run a plan with an `openclaw` worker.
+- OpenClaw with the user's own provider account (optional): OpenClaw is verified end to end as a worker (scripted model, headless and TUI) and with real hosted-model replies (OpenCode's free model through a loopback relay, probe and TUI chat). With a key of your own: `openclaw onboard`, start `openclaw gateway`, and run a plan with an `openclaw` worker.
 - Merging or pushing the completed integration branch is deliberately manual.
 
