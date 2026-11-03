@@ -177,7 +177,10 @@ func (m model) sidebarContent(width int) string {
 		b.WriteString("\n")
 		b.WriteString(section("workers"))
 		for _, agent := range workers {
-			state, stateStyle := "idle", dimStyle
+			state, stateStyle := m.team.status(agent.Name), dimStyle
+			if state == "answering" {
+				stateStyle = warningStyle
+			}
 			if task, ok := m.agentTask(agent.Name); ok {
 				state, stateStyle = shortTaskID(task.ID), warningStyle
 			}
@@ -417,6 +420,9 @@ func (m model) statusView(width int) string {
 	if m.run != nil {
 		queued, active, review, merged, _ := m.taskCounts()
 		parts = append(parts, dimStyle.Render("run "+shortID(m.run.ID))+" "+mutedStyle.Render(fmt.Sprintf("%dq/%da/%dr/%dm", queued, active, review, merged)))
+	}
+	if m.installing != "" {
+		parts = append(parts, warningStyle.Render(m.installing+"…"))
 	}
 	parts = append(parts, stateStyle.Render(strings.ToUpper(m.state)))
 	parts = append(parts, dimStyle.Render("/ commands"))

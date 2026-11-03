@@ -65,7 +65,7 @@ func (m model) handleSessionPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		m.sessionPicker = nil
 		m.previousLead = m.lead
 		m.lead = agent
-		m.gen++
+		m.bumpGen()
 		m.busy = true
 		m.state = "resuming"
 		return m, resumeCmd(m.ctx, m.chat, agent, chosen.ID)
@@ -102,12 +102,13 @@ func (m model) handleResumed(msg resumedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		m.lead = m.previousLead
 		m.setModal("resume failed", msg.err.Error())
-		return m, waitForActivity(m.chat.Session, m.gen)
+		return m, m.listen()
 	}
 	m.chat = msg.chat
 	m.lead = msg.agent
 	m.status = msg.status
 	_ = m.persistLead(msg.agent.Name)
+	m.team.setLead(msg.agent.Name)
 	m.home = false
 	m.loadHistory()
 	m.refreshViewport()
@@ -115,7 +116,7 @@ func (m model) handleResumed(msg resumedMsg) (tea.Model, tea.Cmd) {
 	if msg.status.ResumeError != nil {
 		m.setModal("could not resume", msg.agent.Name+" could not reopen that session, so a new one was started.\n\n"+firstLine(msg.status.ResumeError.Error()))
 	}
-	return m, waitForActivity(m.chat.Session, m.gen)
+	return m, m.listen()
 }
 
 func (m model) sessionPickerContent(width int) string {

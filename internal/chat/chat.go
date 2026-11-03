@@ -22,6 +22,11 @@ type Options struct {
 	Store     *store.Store
 	New       bool
 	AgentLogs io.Writer
+	// Grant returns the MCP servers and environment that let an agent's
+	// session reach its team (switch_team, switch_ask).
+	Grant func(name string) ([]acp.McpServer, []string)
+	// Context describes the team to the lead; it is prepended to each message.
+	Context func(name string) string
 }
 
 type Status struct {
@@ -41,6 +46,8 @@ type Chat struct {
 	Rules   rules.Set
 	Store   *store.Store
 	Session *acpdriver.Session
+	Grant   func(name string) ([]acp.McpServer, []string)
+	Context func(name string) string
 }
 
 // Open creates or resumes the project chat session.
@@ -67,12 +74,6 @@ func Open(ctx context.Context, opts Options) (*Chat, Status, error) {
 	if model == "" && hasStored && !opts.New && stored.Agent == agent {
 		model = stored.Model
 	}
-	if model == "" && agent == "opencode" {
-		// OpenCode's default model can be blocked by provider privacy settings.
-		// Use a known free model for a working first-run experience.
-		model = "opencode/deepseek-v4.1-flash-free"
-	}
-
 	sessionID := ""
 	if hasStored && !opts.New && stored.Agent == agent {
 		sessionID = stored.SessionID
@@ -80,23 +81,14 @@ func Open(ctx context.Context, opts Options) (*Chat, Status, error) {
 
 	var resumeErr error
 	resumed := false
-	session, err := acpdriver.Open(ctx, acpdriver.Spec{
-		Agent:     agent,
-		Cwd:       project,
-		Model:     model,
-		SessionID: sessionID,
-		AgentLogs: opts.AgentLogs,
-	})
+	spec := sessionSpec(project, opts.Name, agent, model, sessionID, opts.Grant)
+	spec.AgentLogs = opts.AgentLogs
+	session, err := acpdriver.Open(ctx, spec)
 	if err != nil && sessionID != "" {
 		// The adapter itself failed; try once more without resuming.
 		resumeErr = err
-		session, err = acpdriver.Open(ctx, acpdriver.Spec{
-			Agent:     agent,
-			Cwd:       project,
-			Model:     model,
-			SessionID: "",
-			AgentLogs: opts.AgentLogs,
-		})
+		spec.SessionID = ""
+		session, err = acpdriver.Open(ctx, spec)
 	} else if err == nil && sessionID != "" {
 		// A failed resume falls back to a new session in the same process.
 		resumeErr = session.ResumeError
@@ -114,6 +106,8 @@ func Open(ctx context.Context, opts Options) (*Chat, Status, error) {
 		Rules:   opts.Rules,
 		Store:   opts.Store,
 		Session: session,
+		Grant:   opts.Grant,
+		Context: opts.Context,
 	}
 	if err := chat.persistSession(ctx); err != nil {
 		_ = session.Close(context.Background())
@@ -137,7 +131,13 @@ func (c *Chat) Send(ctx context.Context, text string) (acp.PromptResponse, error
 	if err := c.Store.AppendMessage(ctx, c.Project, c.Session.ID, "user", text); err != nil {
 		return acp.PromptResponse{}, err
 	}
-	return c.Session.Prompt(ctx, c.Rules.Prompt(text))
+	prompt := c.Rules.Prompt(text)
+	if c.Context != nil {
+		if team := c.Context(c.Name); team != "" {
+			prompt = team + "\n\n" + prompt
+		}
+	}
+	return c.Session.Prompt(ctx, prompt)
 }
 
 func (c *Chat) SaveAssistant(ctx context.Context, text string) error {
@@ -180,39 +180,72 @@ func (c *Chat) Resume(ctx context.Context, name, driver, model, sessionID string
 }
 
 func (c *Chat) reopen(ctx context.Context, name, driver, model, sessionID string) (*Chat, Status, error) {
-	if model == "" && driver == "opencode" {
-		model = "opencode/deepseek-v4.1-flash-free"
-	}
-	session, err := acpdriver.Open(ctx, acpdriver.Spec{
-		Agent:     driver,
-		Cwd:       c.Project,
-		Model:     model,
-		SessionID: sessionID,
-	})
+	session, err := acpdriver.Open(ctx, sessionSpec(c.Project, name, driver, model, sessionID, c.Grant))
 	if err != nil {
 		return nil, Status{}, err
 	}
-
-	next := *c
-	next.Session = session
-	next.Name = name
-	next.Agent = driver
-	next.Model = session.Model
-	if err := next.persistSession(ctx); err != nil {
+	next, status, err := c.Adopt(ctx, name, session)
+	if err != nil {
 		_ = session.Close(context.Background())
 		return nil, Status{}, err
 	}
 	if c.Session != nil {
 		_ = c.Session.Close(context.Background())
 	}
+	status.Resumed = sessionID != "" && session.ResumeError == nil
+	return next, status, nil
+}
+
+// Connect opens a new session for another agent like SwitchAgent, but leaves
+// the current session open so the caller can keep it warm.
+func (c *Chat) Connect(ctx context.Context, name, driver, model string) (*Chat, Status, error) {
+	session, err := StartSession(ctx, c.Project, name, driver, model, c.Grant)
+	if err != nil {
+		return nil, Status{}, err
+	}
+	next, status, err := c.Adopt(ctx, name, session)
+	if err != nil {
+		_ = session.Close(context.Background())
+	}
+	return next, status, err
+}
+
+// Adopt returns a Chat bound to an already running session, such as one
+// started in the background. The current session is left open.
+func (c *Chat) Adopt(ctx context.Context, name string, session *acpdriver.Session) (*Chat, Status, error) {
+	next := *c
+	next.Session = session
+	next.Name = name
+	next.Agent = session.Agent
+	next.Model = session.Model
+	if err := next.persistSession(ctx); err != nil {
+		return nil, Status{}, err
+	}
 	return &next, Status{
-		Agent:       driver,
+		Agent:       session.Agent,
 		Model:       session.Model,
 		SessionID:   session.ID,
-		Resumed:     sessionID != "" && session.ResumeError == nil,
 		ResumeError: session.ResumeError,
 		Caps:        session.Caps,
 	}, nil
+}
+
+// StartSession starts a new session for an agent in the project, for callers
+// that keep sessions warm before they are needed.
+func StartSession(ctx context.Context, project, name, driver, model string, grant func(string) ([]acp.McpServer, []string)) (*acpdriver.Session, error) {
+	return acpdriver.Open(ctx, sessionSpec(project, name, driver, model, "", grant))
+}
+
+func sessionSpec(project, name, driver, model, sessionID string, grant func(string) ([]acp.McpServer, []string)) acpdriver.Spec {
+	if model == "" && driver == "opencode" {
+		// OpenCode's default model can be blocked by provider privacy settings.
+		model = "opencode/deepseek-v4.1-flash-free"
+	}
+	spec := acpdriver.Spec{Agent: driver, Cwd: project, Model: model, SessionID: sessionID}
+	if grant != nil {
+		spec.MCPServers, spec.Env = grant(name)
+	}
+	return spec
 }
 
 func (c *Chat) Close(ctx context.Context) error {

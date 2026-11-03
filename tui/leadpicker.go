@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"fmt"
-
 	"github.com/urizennnn/switch/internal/config"
 )
 
@@ -27,7 +25,7 @@ func buildLeadPicker(m model) *leadPicker {
 		available := adapterAvailable(agent.Driver)
 		choices = append(choices, leadChoice{
 			Label:     agent.Name,
-			Detail:    fmt.Sprintf("%s · %s", m.roleLabel(agent), agent.Driver),
+			Detail:    pickerDetail(m.roleLabel(agent), agent.Driver, m.team.status(agent.Name)),
 			Section:   "Configured agents",
 			Agent:     agent,
 			Available: available,
@@ -43,4 +41,13 @@ func buildLeadPicker(m model) *leadPicker {
 		}
 	}
 	return &leadPicker{choices: choices, index: index}
+}
+
+// pickerDetail notes when switching to an agent is instant.
+func pickerDetail(role, driver, status string) string {
+	detail := role + " · " + driver
+	if status == "ready" {
+		detail += " · ready"
+	}
+	return detail
 }

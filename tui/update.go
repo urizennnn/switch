@@ -48,10 +48,12 @@ type newSessionResultMsg struct {
 }
 
 type leadChangedMsg struct {
-	agent  config.Agent
-	chat   *chat.Chat
-	status chat.Status
-	err    error
+	agent    config.Agent
+	chat     *chat.Chat
+	status   chat.Status
+	err      error
+	previous *acpdriver.Session // the outgoing lead's session, kept warm
+	adopted  *acpdriver.Session // the warm session used, if any
 }
 
 type adapterActionMsg struct {
@@ -61,9 +63,14 @@ type adapterActionMsg struct {
 	err    error
 }
 
-func waitForActivity(session *acpdriver.Session, gen int) tea.Cmd {
+// waitForActivity waits for the lead session's next event. stop closes when
+// the lead changes, so a listener left on a parked session exits instead of
+// taking that session's events later.
+func waitForActivity(session *acpdriver.Session, gen int, stop <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		select {
+		case <-stop:
+			return nil
 		case event, ok := <-session.Events:
 			if !ok {
 				return agentEventMsg{gen: gen, event: acpdriver.Event{Type: acpdriver.EventExit}}
@@ -122,11 +129,51 @@ func adapterActionCmd(ctx context.Context, name, action string) tea.Cmd {
 	}
 }
 
-func switchLeadCmd(ctx context.Context, conversation *chat.Chat, agent config.Agent) tea.Cmd {
+// switchLeadCmd makes agent the lead, adopting its warm session when there is
+// one. The outgoing lead's session stays open so it can be kept warm.
+func switchLeadCmd(ctx context.Context, conversation *chat.Chat, agent config.Agent, warm *acpdriver.Session) tea.Cmd {
 	return func() tea.Msg {
-		next, status, err := conversation.SwitchAgent(ctx, agent.Name, agent.Driver, agent.Model)
-		return leadChangedMsg{agent: agent, chat: next, status: status, err: err}
+		msg := leadChangedMsg{agent: agent, previous: conversation.Session, adopted: warm}
+		if warm != nil {
+			msg.chat, msg.status, msg.err = conversation.Adopt(ctx, agent.Name, warm)
+		} else {
+			msg.chat, msg.status, msg.err = conversation.Connect(ctx, agent.Name, agent.Driver, agent.Model)
+		}
+		return msg
 	}
+}
+
+type warmedMsg struct {
+	name    string
+	session *acpdriver.Session
+	err     error
+}
+
+// warmCmds starts the team's other agents in the background.
+func (m model) warmCmds() []tea.Cmd {
+	var cmds []tea.Cmd
+	for _, agent := range m.team.toWarm() {
+		cmds = append(cmds, func() tea.Msg {
+			session, err := chat.StartSession(m.ctx, m.project, agent.Name, agent.Driver, agent.Model, m.team.grant)
+			return warmedMsg{name: agent.Name, session: session, err: err}
+		})
+	}
+	return cmds
+}
+
+// listen waits for the current lead session's next event.
+func (m model) listen() tea.Cmd {
+	return waitForActivity(m.chat.Session, m.gen, m.listenStop)
+}
+
+// bumpGen starts a new lead generation: events from the old session are
+// ignored and its listener stops.
+func (m *model) bumpGen() {
+	m.gen++
+	if m.listenStop != nil {
+		close(m.listenStop)
+	}
+	m.listenStop = make(chan struct{})
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -171,9 +218,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.adapterPicker.err = adapterConfirmText(choice)
 					return m, nil
 				}
+				// Installs run in the background; the chat stays usable.
 				m.adapterPicker = nil
-				m.busy = true
-				m.state = "adapter " + choice.Action
+				m.installing = choice.Name + " " + choice.Action
 				return m, adapterActionCmd(m.ctx, choice.Name, choice.Action)
 			}
 			return m, nil
@@ -355,10 +402,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = true
 			m.state = "working"
 			m.refreshViewport()
-			return m, tea.Batch(waitForActivity(m.chat.Session, m.gen), sendPrompt(m.ctx, m.chat, text))
+			return m, tea.Batch(append(m.warmCmds(), m.listen(), sendPrompt(m.ctx, m.chat, text))...)
 		}
 		m.refreshViewport()
-		return m, waitForActivity(m.chat.Session, m.gen)
+		// The lead is up; start the rest of the team in the background.
+		return m, tea.Batch(append(m.warmCmds(), m.listen())...)
 
 	case agentEventMsg:
 		if msg.gen != m.gen {
@@ -371,7 +419,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.permission = msg.request
-		m.permissionResume = waitForActivity(m.chat.Session, m.gen)
+		m.permissionResume = m.listen()
 		m.state = "permission"
 		return m, nil
 
@@ -410,6 +458,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case resumedMsg:
 		return m.handleResumed(msg)
+
+	case warmedMsg:
+		if msg.err != nil {
+			m.team.warmFailed(msg.name)
+			return m, nil
+		}
+		if m.ctx.Err() != nil {
+			go msg.session.Close(context.Background())
+			return m, nil
+		}
+		m.team.park(msg.name, msg.session)
+		return m, nil
 
 	case dashboardTickMsg:
 		if m.job == "" {
@@ -466,7 +526,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = "ready"
 		if msg.err != nil {
 			m.setModal("new session failed", msg.err.Error())
-			return m, waitForActivity(m.chat.Session, m.gen)
+			return m, m.listen()
 		}
 		m.chat = msg.chat
 		m.status = msg.status
@@ -474,17 +534,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		m.refreshDashboard()
 		m.setModal("new session", m.chat.Session.ID)
-		return m, waitForActivity(m.chat.Session, m.gen)
+		return m, m.listen()
 
 	case adapterActionMsg:
-		m.busy = false
-		m.state = "ready"
+		m.installing = ""
 		if msg.err != nil {
 			m.setModal("adapter", msg.name+" "+msg.action+" failed\n\n"+msg.err.Error()+"\n"+msg.output)
-		} else {
-			m.setModal("adapter", msg.name+" "+msg.action+" complete\n\n"+msg.output)
+			return m, nil
 		}
-		return m, nil
+		m.setModal("adapter", msg.name+" "+msg.action+" complete\n\n"+msg.output)
+		if m.chat == nil {
+			return m, nil
+		}
+		// A newly available adapter can join the warm team at once.
+		return m, tea.Batch(m.warmCmds()...)
 
 	case leadChangedMsg:
 		m.busy = false
@@ -494,13 +557,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lead = m.previousLead
 				_ = m.persistLead(m.previousLead.Name)
 			}
+			m.team.park(msg.agent.Name, msg.adopted)
 			m.setModal("lead switch failed", msg.err.Error())
-			return m, waitForActivity(m.chat.Session, m.gen)
+			return m, m.listen()
 		}
 		m.chat = msg.chat
 		m.lead = msg.agent
 		m.status = msg.status
 		_ = m.persistLead(msg.agent.Name)
+		m.team.setLead(msg.agent.Name)
+		m.team.park(m.previousLead.Name, msg.previous) // instant to switch back
 		// The new lead has its own session, so its transcript starts fresh.
 		note := fmt.Sprintf("%s (%s) is now the lead", msg.agent.Name, msg.agent.Driver)
 		_ = m.chat.Note(m.ctx, note)
@@ -508,7 +574,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		m.refreshDashboard()
 		m.setModal("lead", fmt.Sprintf("%s is now the lead (%s)", msg.agent.Name, msg.agent.Driver))
-		return m, waitForActivity(m.chat.Session, m.gen)
+		return m, m.listen()
 	}
 
 	return m, nil
@@ -528,10 +594,10 @@ func (m model) beginLeadSwitch(agent config.Agent) (tea.Model, tea.Cmd) {
 		m.setModal("lead", "could not save lead: "+err.Error())
 		return m, nil
 	}
-	m.gen++
+	m.bumpGen()
 	m.busy = true
 	m.state = "starting lead"
-	return m, switchLeadCmd(m.ctx, m.chat, agent)
+	return m, switchLeadCmd(m.ctx, m.chat, agent, m.team.take(agent.Name))
 }
 
 func (m *model) setModal(title, body string) {
@@ -613,17 +679,17 @@ func (m model) handleAgentEvent(event acpdriver.Event) (tea.Model, tea.Cmd) {
 	case acpdriver.EventMessage:
 		m.appendAssistantChunk(event.Text)
 		m.refreshViewport()
-		return m, waitForActivity(m.chat.Session, m.gen)
+		return m, m.listen()
 
 	case acpdriver.EventThought:
-		return m, waitForActivity(m.chat.Session, m.gen)
+		return m, m.listen()
 
 	case acpdriver.EventToolCall, acpdriver.EventToolEdit:
 		if event.Tool != nil {
 			m.appendTool(event.Tool.ID, event.Tool.Title, event.Tool.Status)
 			m.refreshViewport()
 		}
-		return m, waitForActivity(m.chat.Session, m.gen)
+		return m, m.listen()
 
 	case acpdriver.EventPlan:
 		items := make([]string, 0, len(event.Plan))
@@ -639,13 +705,13 @@ func (m model) handleAgentEvent(event acpdriver.Event) (tea.Model, tea.Cmd) {
 		}
 		m.setPlan(items)
 		m.refreshViewport()
-		return m, waitForActivity(m.chat.Session, m.gen)
+		return m, m.listen()
 
 	case acpdriver.EventUsage:
 		if event.Usage != nil {
 			m.state = fmt.Sprintf("working · %d/%d tokens", event.Usage.Used, event.Usage.Size)
 		}
-		return m, waitForActivity(m.chat.Session, m.gen)
+		return m, m.listen()
 
 	case acpdriver.EventTurn:
 		text := m.closeAssistant()
@@ -653,7 +719,7 @@ func (m model) handleAgentEvent(event acpdriver.Event) (tea.Model, tea.Cmd) {
 		m.state = "ready"
 		m.refreshViewport()
 
-		cmds := []tea.Cmd{waitForActivity(m.chat.Session, m.gen)}
+		cmds := []tea.Cmd{m.listen()}
 		if strings.TrimSpace(text) != "" {
 			cmds = append(cmds, saveAssistant(m.ctx, m.chat, text))
 		}
@@ -666,7 +732,7 @@ func (m model) handleAgentEvent(event acpdriver.Event) (tea.Model, tea.Cmd) {
 		}
 		m.busy = false
 		m.state = "error"
-		return m, waitForActivity(m.chat.Session, m.gen)
+		return m, m.listen()
 
 	case acpdriver.EventExit:
 		m.appendSystem("agent exited")
@@ -676,7 +742,7 @@ func (m model) handleAgentEvent(event acpdriver.Event) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	return m, waitForActivity(m.chat.Session, m.gen)
+	return m, m.listen()
 }
 
 func adapterConfirmText(choice adapterChoice) string {
@@ -919,13 +985,17 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		}
 
 	case "/adapters":
+		if m.installing != "" {
+			m.setModal("adapters", m.installing+" is still running; wait for it to finish")
+			break
+		}
 		m.adapterPicker = buildAdapterPicker()
 		m.picker = nil
 		m.modal = ""
 		m.modalTitle = ""
 
 	case "/new":
-		m.gen++
+		m.bumpGen()
 		m.busy = true
 		m.state = "new session"
 		return m, newSessionCmd(m.ctx, m.chat)

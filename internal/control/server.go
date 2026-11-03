@@ -56,6 +56,7 @@ type Server struct {
 
 	store    *store.Store
 	runID    string
+	team     Team
 	exe      string
 	onText   func(agent, text string)
 	listener net.Listener
@@ -68,8 +69,10 @@ type Server struct {
 }
 
 type Options struct {
-	Store    *store.Store
-	RunID    string
+	Store *store.Store // run mode: tasks and events of RunID
+	RunID string       // the run, or any stable key for a team server
+	// Team, when set, answers switch_team and switch_ask (chat mode).
+	Team     Team
 	StateDir string
 	// OnText receives progress reports, as if the agent had streamed them.
 	OnText func(agent, text string)
@@ -114,7 +117,7 @@ func Listen(opts Options) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{
-		Path: path, store: opts.Store, runID: opts.RunID, exe: exe, onText: opts.OnText,
+		Path: path, store: opts.Store, runID: opts.RunID, team: opts.Team, exe: exe, onText: opts.OnText,
 		listener: listener, created: created, tokens: map[string]identity{}, blocks: map[string]string{},
 	}
 	s.wg.Add(1)
@@ -202,7 +205,8 @@ func (s *Server) handleConn(conn net.Conn) {
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	encoder := json.NewEncoder(conn)
 	for scanner.Scan() {
-		_ = conn.SetDeadline(time.Now().Add(time.Minute))
+		// Long enough for switch_ask, which waits for a teammate's answer.
+		_ = conn.SetDeadline(time.Now().Add(askTimeout + time.Minute))
 		var req Request
 		var resp Response
 		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
@@ -220,6 +224,54 @@ func (s *Server) handleConn(conn net.Conn) {
 
 var errUnauthorized = errors.New("unauthorized: unknown or revoked token")
 
+// askTimeout bounds one switch_ask round trip.
+const askTimeout = 10 * time.Minute
+
+// Member is one agent as switch_team reports it.
+type Member struct {
+	Name   string `json:"name"`
+	Role   string `json:"role"`
+	Driver string `json:"driver"`
+	Status string `json:"status"`
+	You    bool   `json:"you,omitempty"`
+}
+
+// Team is the agent roster behind switch_team and switch_ask in the chat.
+type Team interface {
+	Members(caller string) []Member
+	// Ask sends a message from one agent to another and returns the reply.
+	Ask(ctx context.Context, from, to, message string) (string, error)
+}
+
+// runMembers reports a run's agents and what each is working on.
+func (s *Server) runMembers(ctx context.Context, who identity) ([]Member, error) {
+	if s.store == nil {
+		return nil, errors.New("no team information")
+	}
+	agents, err := s.store.RunAgents(ctx, s.runID)
+	if err != nil {
+		return nil, err
+	}
+	tasks, err := s.store.TasksForRun(ctx, s.runID)
+	if err != nil {
+		return nil, err
+	}
+	members := make([]Member, 0, len(agents))
+	for _, agent := range agents {
+		status := "idle"
+		if agent.Role == "lead" {
+			status = "reviews and merges with the user"
+		}
+		for _, task := range tasks {
+			if task.Assignee == agent.Name && (task.Status == execution.StatusRunning || task.Status == execution.StatusVerifying) {
+				status = task.Status + " " + task.Title
+			}
+		}
+		members = append(members, Member{Name: agent.Name, Role: agent.Role, Driver: agent.Driver, Status: status, You: agent.Name == who.agent})
+	}
+	return members, nil
+}
+
 func (s *Server) handle(req Request) (any, error) {
 	s.mu.Lock()
 	who, ok := s.tokens[req.Token]
@@ -227,11 +279,16 @@ func (s *Server) handle(req Request) (any, error) {
 	if !ok {
 		return nil, errUnauthorized
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	timeout := 10 * time.Second
+	if req.Method == "ask" {
+		timeout = askTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	var params struct {
 		Message string   `json:"message"`
+		To      string   `json:"to"`
 		Title   string   `json:"title"`
 		Brief   string   `json:"brief"`
 		Role    string   `json:"role"`
@@ -246,6 +303,21 @@ func (s *Server) handle(req Request) (any, error) {
 	message := strings.TrimSpace(params.Message)
 
 	switch req.Method {
+	case "team":
+		if s.team != nil {
+			return s.team.Members(who.agent), nil
+		}
+		return s.runMembers(ctx, who)
+
+	case "ask":
+		if s.team == nil {
+			return nil, errors.New("switch_ask is available in the chat; during a run, report to the lead with switch_progress")
+		}
+		if message == "" || strings.TrimSpace(params.To) == "" {
+			return nil, errors.New("ask needs a teammate (to) and a message")
+		}
+		return s.team.Ask(ctx, who.agent, strings.TrimSpace(params.To), message)
+
 	case "whoami":
 		return map[string]string{"agent": who.agent, "role": who.role, "task": who.taskID, "run": s.runID}, nil
 
@@ -372,5 +444,8 @@ func (s *Server) delegate(ctx context.Context, who identity, title, brief, role 
 }
 
 func (s *Server) event(ctx context.Context, who identity, kind, message string) {
+	if s.store == nil {
+		return
+	}
 	_ = s.store.AddEvent(ctx, store.Event{RunID: s.runID, TaskID: who.taskID, Agent: who.agent, Kind: kind, Message: message})
 }

@@ -22,7 +22,11 @@ func Call(socket, token, method string, params any) (any, error) {
 		return nil, fmt.Errorf("control socket: %w", err)
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	deadline := 30 * time.Second
+	if method == "ask" {
+		deadline = askTimeout + time.Minute
+	}
+	_ = conn.SetDeadline(time.Now().Add(deadline))
 
 	raw, err := json.Marshal(params)
 	if err != nil {
@@ -49,11 +53,14 @@ func Call(socket, token, method string, params any) (any, error) {
 // prefer a shell command to MCP tools.
 func RunAgentCLI(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: switch __control agent <whoami|task|progress|complete|block> [message]")
+		fmt.Fprintln(stderr, "usage: switch __control agent <whoami|team|task|progress|complete|block> [message]\n       switch __control agent ask <teammate> <message>")
 		return 2
 	}
-	result, err := Call(os.Getenv(EnvSocket), os.Getenv(EnvToken), args[0],
-		map[string]string{"message": strings.Join(args[1:], " ")})
+	params := map[string]string{"message": strings.Join(args[1:], " ")}
+	if args[0] == "ask" && len(args) > 1 {
+		params = map[string]string{"to": args[1], "message": strings.Join(args[2:], " ")}
+	}
+	result, err := Call(os.Getenv(EnvSocket), os.Getenv(EnvToken), args[0], params)
 	if err != nil {
 		fmt.Fprintln(stderr, "switch:", err)
 		return 1

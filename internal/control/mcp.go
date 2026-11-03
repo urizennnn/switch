@@ -46,6 +46,17 @@ func messageSchema(description string) map[string]any {
 }
 
 var tools = []tool{
+	{Name: "switch_team", method: "team", Description: "List the agents on your Switch team: name, role, driver, and what each is doing.",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}}},
+	{Name: "switch_ask", method: "ask", Description: "Ask a teammate on your Switch team a question and wait for their answer. Use it to get a second opinion or knowledge from another agent; they do not edit files.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"to":      map[string]any{"type": "string", "description": "the teammate's name, from switch_team"},
+				"message": map[string]any{"type": "string", "description": "the question or request"},
+			},
+			"required": []string{"to", "message"},
+		}},
 	{Name: "switch_task", method: "task", Description: "Show your current Switch task: brief, acceptance criteria, verification commands, and feedback from earlier attempts.",
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}}},
 	{Name: "switch_progress", method: "progress", Description: "Report progress to the user watching the Switch run.",

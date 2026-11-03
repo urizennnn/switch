@@ -220,3 +220,42 @@ func TestSocketInUseIsRefused(t *testing.T) {
 	}
 	stale.Close()
 }
+
+type fakeTeam struct{ asked []string }
+
+func (f *fakeTeam) Members(caller string) []Member {
+	return []Member{{Name: "lead", You: caller == "lead"}, {Name: "builder-1"}}
+}
+
+func (f *fakeTeam) Ask(_ context.Context, from, to, message string) (string, error) {
+	f.asked = append(f.asked, from+">"+to+":"+message)
+	return "answer from " + to, nil
+}
+
+func TestTeamMode(t *testing.T) {
+	dir, err := os.MkdirTemp("", "swt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	team := &fakeTeam{}
+	server, err := Listen(Options{RunID: "teamkey1", StateDir: dir, Team: team, Executable: "/bin/switch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	grant, _ := server.Grant(store.RunAgent{Name: "lead", Role: "lead"}, "")
+	token := strings.TrimPrefix(grant.Env[1], EnvToken+"=")
+
+	members, err := Call(server.Path, token, "team", nil)
+	if err != nil || len(members.([]any)) != 2 {
+		t.Fatalf("team = %v, %v", members, err)
+	}
+	reply, err := Call(server.Path, token, "ask", map[string]string{"to": "builder-1", "message": "thoughts?"})
+	if err != nil || reply != "answer from builder-1" || len(team.asked) != 1 || team.asked[0] != "lead>builder-1:thoughts?" {
+		t.Fatalf("ask = %v, %v (%v)", reply, err, team.asked)
+	}
+	if _, err := Call(server.Path, token, "ask", map[string]string{"message": "no recipient"}); err == nil {
+		t.Fatal("ask without a teammate succeeded")
+	}
+}

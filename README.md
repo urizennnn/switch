@@ -121,6 +121,14 @@ background; a message sent before it is ready is delivered once it connects.
 Lead replies render as markdown, tool calls show as one line each that
 updates in place, and the agent's plan shows as a checklist.
 
+Once the lead is connected, Switch starts the other configured agents in the
+background, so `/lead` switches instantly and switching back keeps the old
+session warm. The lead knows its team: each message carries a short team
+note, and every agent session can call `switch_team` (who is on the team) and
+`switch_ask` (consult a teammate and get its answer) through the Switch MCP
+server, or `$SWITCH_BIN __control agent team|ask` from a shell. Adapter
+installs run in the background while you keep chatting.
+
 Type `/` to open the command palette. It filters as you type, shows
 descriptions, and supports up/down, tab completion, and enter. Anything that
 does not start with `/` is sent to the agent.

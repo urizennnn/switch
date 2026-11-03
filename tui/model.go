@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/textinput"
@@ -70,8 +71,11 @@ type model struct {
 	runConfig        config.RunConfig
 	taskPicker       *taskPicker
 	sessionPicker    *sessionPicker
-	zen              bool // sidebar hidden
-	runOwner         int  // PID of another process driving the run, such as a detached run
+	zen              bool   // sidebar hidden
+	installing       string // adapter action running in the background
+	team             *team
+	listenStop       chan struct{}
+	runOwner         int // PID of another process driving the run, such as a detached run
 	picker           *leadPicker
 	adapterPicker    *adapterPicker
 	run              *store.Run
@@ -115,6 +119,8 @@ func New(opts Options) model {
 		connecting: true,
 		home:       true, // usable at once; the lead connects in the background
 	}
+	m.team = newTeam(m.project, m.dashboardFleet(), m.lead.Name)
+	m.listenStop = make(chan struct{})
 	m.layout()
 	return m
 }
@@ -259,7 +265,9 @@ type connectedMsg struct {
 }
 
 func (m model) connectCmd() tea.Cmd {
+	t := m.team
 	return func() tea.Msg {
+		t.listen()
 		conversation, status, err := chat.Open(m.ctx, chat.Options{
 			Project: m.project,
 			Name:    m.lead.Name,
@@ -267,6 +275,8 @@ func (m model) connectCmd() tea.Cmd {
 			Model:   m.lead.Model,
 			Rules:   m.rules,
 			Store:   m.store,
+			Grant:   t.grant,
+			Context: t.describe,
 		})
 		return connectedMsg{chat: conversation, status: status, err: err}
 	}
@@ -279,10 +289,24 @@ func (m *model) shutdown() {
 		_ = m.persistLead(m.lead.Name)
 	}
 	m.stopJob()
+	// Close the lead and the warm team in parallel, then stop anything left.
+	var wg sync.WaitGroup
+	if m.chat != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = m.chat.Close(context.Background())
+		}()
+	}
+	if m.team != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.team.close()
+		}()
+	}
+	wg.Wait()
 	if m.cancel != nil {
 		m.cancel()
-	}
-	if m.chat != nil {
-		_ = m.chat.Close(context.Background())
 	}
 }
