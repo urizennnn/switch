@@ -15,6 +15,7 @@ import (
 
 type Options struct {
 	Project   string
+	Name      string // configured agent name, recorded so the session can be resumed
 	Agent     string
 	Model     string
 	Rules     rules.Set
@@ -34,7 +35,8 @@ type Status struct {
 
 type Chat struct {
 	Project string
-	Agent   string
+	Name    string // configured agent name
+	Agent   string // driver
 	Model   string
 	Rules   rules.Set
 	Store   *store.Store
@@ -106,6 +108,7 @@ func Open(ctx context.Context, opts Options) (*Chat, Status, error) {
 
 	chat := &Chat{
 		Project: project,
+		Name:    opts.Name,
 		Agent:   agent,
 		Model:   session.Model,
 		Rules:   opts.Rules,
@@ -160,14 +163,31 @@ func (c *Chat) History(ctx context.Context, limit int) ([]store.Message, error) 
 // bound to it. The receiver is left untouched so callers on another goroutine
 // can keep reading it; the old session is closed only once the new one is
 // ready and persisted.
-func (c *Chat) SwitchAgent(ctx context.Context, driver, model string) (*Chat, Status, error) {
+func (c *Chat) SwitchAgent(ctx context.Context, name, driver, model string) (*Chat, Status, error) {
+	return c.reopen(ctx, name, driver, model, "")
+}
+
+// NewSession replaces the current session with a fresh one for the same agent.
+func (c *Chat) NewSession(ctx context.Context) (*Chat, Status, error) {
+	return c.SwitchAgent(ctx, c.Name, c.Agent, c.Model)
+}
+
+// Resume reopens a past session of this project with the agent that owns it.
+// When the adapter cannot resume it, the new Chat has a fresh session and
+// Status.ResumeError says why.
+func (c *Chat) Resume(ctx context.Context, name, driver, model, sessionID string) (*Chat, Status, error) {
+	return c.reopen(ctx, name, driver, model, sessionID)
+}
+
+func (c *Chat) reopen(ctx context.Context, name, driver, model, sessionID string) (*Chat, Status, error) {
 	if model == "" && driver == "opencode" {
 		model = "opencode/deepseek-v4.1-flash-free"
 	}
 	session, err := acpdriver.Open(ctx, acpdriver.Spec{
-		Agent: driver,
-		Cwd:   c.Project,
-		Model: model,
+		Agent:     driver,
+		Cwd:       c.Project,
+		Model:     model,
+		SessionID: sessionID,
 	})
 	if err != nil {
 		return nil, Status{}, err
@@ -175,6 +195,7 @@ func (c *Chat) SwitchAgent(ctx context.Context, driver, model string) (*Chat, St
 
 	next := *c
 	next.Session = session
+	next.Name = name
 	next.Agent = driver
 	next.Model = session.Model
 	if err := next.persistSession(ctx); err != nil {
@@ -185,16 +206,13 @@ func (c *Chat) SwitchAgent(ctx context.Context, driver, model string) (*Chat, St
 		_ = c.Session.Close(context.Background())
 	}
 	return &next, Status{
-		Agent:     driver,
-		Model:     session.Model,
-		SessionID: session.ID,
-		Caps:      session.Caps,
+		Agent:       driver,
+		Model:       session.Model,
+		SessionID:   session.ID,
+		Resumed:     sessionID != "" && session.ResumeError == nil,
+		ResumeError: session.ResumeError,
+		Caps:        session.Caps,
 	}, nil
-}
-
-// NewSession replaces the current session with a fresh one for the same agent.
-func (c *Chat) NewSession(ctx context.Context) (*Chat, Status, error) {
-	return c.SwitchAgent(ctx, c.Agent, c.Model)
 }
 
 func (c *Chat) Close(ctx context.Context) error {
@@ -204,6 +222,7 @@ func (c *Chat) Close(ctx context.Context) error {
 func (c *Chat) persistSession(ctx context.Context) error {
 	return c.Store.SaveChatSession(ctx, store.ChatSession{
 		Project:   c.Project,
+		Name:      c.Name,
 		Agent:     c.Agent,
 		Model:     c.Model,
 		SessionID: c.Session.ID,

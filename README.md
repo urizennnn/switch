@@ -70,7 +70,9 @@ go build -o switch .
 | `/session` | Show the current agent session |
 | `/lead <agent>` | Choose which configured agent leads and persist it |
 | `/adapters` | Install or uninstall ACP adapters (not during a run) |
-| `/new` | Start a new agent session |
+| `/new` | Start a new session with an empty transcript |
+| `/resume` | Pick a past session of this project and continue it with the agent that owned it |
+| `/zen` | Hide or show the sidebar (also `ctrl+o`) |
 | `/home` | Return to the dashboard |
 | `/help` | Show commands |
 | `/quit` | Exit |

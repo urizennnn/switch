@@ -32,7 +32,9 @@ var slashCommands = []slashCommand{
 	{Name: "/session", Description: "show session"},
 	{Name: "/lead", Args: "<agent>", Description: "choose the lead", NeedsArg: true},
 	{Name: "/adapters", Description: "manage ACP adapters"},
-	{Name: "/new", Description: "new session"},
+	{Name: "/new", Description: "start a new session"},
+	{Name: "/resume", Description: "resume a past session"},
+	{Name: "/zen", Description: "hide or show the sidebar"},
 	{Name: "/home", Description: "dashboard"},
 	{Name: "/help", Description: "show help"},
 	{Name: "/quit", Description: "exit"},
@@ -71,6 +73,7 @@ var keyBindings = []keyBinding{
 	{Keys: "tab", Description: "complete"},
 	{Keys: "up/down", Description: "select"},
 	{Keys: "esc", Description: "close or cancel"},
+	{Keys: "ctrl+o", Description: "zen mode"},
 	{Keys: "ctrl+c", Description: "quit"},
 }
 

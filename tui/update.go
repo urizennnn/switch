@@ -124,7 +124,7 @@ func adapterActionCmd(ctx context.Context, name, action string) tea.Cmd {
 
 func switchLeadCmd(ctx context.Context, conversation *chat.Chat, agent config.Agent) tea.Cmd {
 	return func() tea.Msg {
-		next, status, err := conversation.SwitchAgent(ctx, agent.Driver, agent.Model)
+		next, status, err := conversation.SwitchAgent(ctx, agent.Name, agent.Driver, agent.Model)
 		return leadChangedMsg{agent: agent, chat: next, status: status, err: err}
 	}
 }
@@ -177,6 +177,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, adapterActionCmd(m.ctx, choice.Name, choice.Action)
 			}
 			return m, nil
+		}
+
+		if msg.String() == "ctrl+o" {
+			m.toggleZen()
+			return m, nil
+		}
+
+		if m.sessionPicker != nil {
+			return m.handleSessionPickerKey(msg)
 		}
 
 		if m.taskPicker != nil {
@@ -398,6 +407,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.appendJobText(msg.agent, msg.text)
 		return m, m.waitJob()
+
+	case resumedMsg:
+		return m.handleResumed(msg)
 
 	case dashboardTickMsg:
 		if m.job == "" {
@@ -717,14 +729,14 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(text)
 	command := fields[0]
 	switch command {
-	case "/plan", "/run", "/doctor", "/lead", "/adapters", "/new":
+	case "/plan", "/run", "/doctor", "/lead", "/adapters", "/new", "/resume":
 		if m.busy {
 			m.setModal("busy", "wait for the current turn to finish")
 			return m, nil
 		}
 	}
 	switch command {
-	case "/session", "/new":
+	case "/session", "/new", "/resume":
 		if m.chat == nil {
 			m.setModal(command[1:], m.lead.Name+" is still connecting; try again in a moment")
 			return m, nil
@@ -835,6 +847,12 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+
+	case "/resume":
+		return m.openSessionPicker()
+
+	case "/zen":
+		m.toggleZen()
 
 	case "/agents":
 		m.setModal("agents", m.agentsContent())
@@ -950,4 +968,11 @@ func (m *model) reconnect() tea.Cmd {
 	m.connecting = true
 	m.state = "connecting"
 	return m.connectCmd()
+}
+
+// toggleZen hides or shows the sidebar so the conversation gets the full width.
+func (m *model) toggleZen() {
+	m.zen = !m.zen
+	m.layout()
+	m.refreshViewport()
 }

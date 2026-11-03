@@ -31,6 +31,8 @@ func (m model) View() tea.View {
 			footer = "enter again to confirm · esc cancel"
 		}
 		return tea.NewView(m.withModal(base, width, "ACP adapters", m.adapterPickerContent(width), footer))
+	case m.sessionPicker != nil:
+		return tea.NewView(m.withModal(base, width, "resume a session", m.sessionPickerContent(min(82, max(44, width*2/3))), "↑/↓ select · enter resume · esc cancel"))
 	case m.taskPicker != nil:
 		return tea.NewView(m.withModal(base, width, "tasks", m.taskPickerContent(min(82, max(44, width*2/3))), "enter details · a approve · r reject · d diff · t retry · esc"))
 	case m.picker != nil:
@@ -49,6 +51,9 @@ func (m model) View() tea.View {
 	y := lipgloss.Height(base) - 5 - paletteHeight
 	y = max(1, y)
 	x := sidebarWidth + 3
+	if m.zen {
+		x = 2
+	}
 
 	comp := lipgloss.NewCompositor(
 		lipgloss.NewLayer(base).X(0).Y(0).Z(0),
@@ -103,6 +108,9 @@ func (m model) bodyHeight() int {
 }
 
 func (m model) paneWidths(width int) (sidebarWidth, mainWidth int) {
+	if m.zen {
+		return 0, max(24, width-4) // the main pane takes the sidebar's place
+	}
 	sidebarWidth = min(34, max(26, width/4))
 	mainWidth = max(24, width-sidebarWidth-5)
 	return sidebarWidth, mainWidth
@@ -124,7 +132,6 @@ func (m model) bodyView(width int) string {
 	sidebarWidth, mainWidth := m.paneWidths(width)
 	height := m.bodyHeight()
 
-	sidebar := panel(sidebarWidth, height, "workspace", m.sidebarContent(sidebarWidth))
 	var main string
 	if m.job != "" {
 		// The job log sits under the main pane so chat stays usable during a run.
@@ -136,6 +143,10 @@ func (m model) bodyView(width int) string {
 		main = panel(mainWidth, height, m.mainTitle(), m.mainContent(mainWidth, height))
 	}
 
+	if m.zen {
+		return main
+	}
+	sidebar := panel(sidebarWidth, height, "workspace", m.sidebarContent(sidebarWidth))
 	return lipgloss.JoinHorizontal(lipgloss.Top, sidebar, " ", main)
 }
 

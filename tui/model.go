@@ -69,7 +69,9 @@ type model struct {
 	engine           *execution.Engine
 	runConfig        config.RunConfig
 	taskPicker       *taskPicker
-	runOwner         int // PID of another process driving the run, such as a detached run
+	sessionPicker    *sessionPicker
+	zen              bool // sidebar hidden
+	runOwner         int  // PID of another process driving the run, such as a detached run
 	picker           *leadPicker
 	adapterPicker    *adapterPicker
 	run              *store.Run
@@ -260,6 +262,7 @@ func (m model) connectCmd() tea.Cmd {
 	return func() tea.Msg {
 		conversation, status, err := chat.Open(m.ctx, chat.Options{
 			Project: m.project,
+			Name:    m.lead.Name,
 			Agent:   m.lead.Driver,
 			Model:   m.lead.Model,
 			Rules:   m.rules,

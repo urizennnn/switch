@@ -18,7 +18,8 @@ type Store struct {
 
 type ChatSession struct {
 	Project   string
-	Agent     string
+	Name      string // configured agent name, such as builder-1
+	Agent     string // driver
 	Model     string
 	SessionID string
 	UpdatedAt time.Time
@@ -205,6 +206,16 @@ func (s *Store) SaveChatSession(ctx context.Context, session ChatSession) error 
 			session_id = excluded.session_id,
 			updated_at = excluded.updated_at`,
 		session.Project, session.Agent, session.Model, session.SessionID,
+		time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return err
+	}
+	// Remember every session, not just the current one, so it can be resumed.
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO session_history(id, project, agent_name, driver, model, created_at)
+		VALUES(?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET model = excluded.model`,
+		session.SessionID, session.Project, session.Name, session.Agent, session.Model,
 		time.Now().UTC().Format(time.RFC3339))
 	return err
 }

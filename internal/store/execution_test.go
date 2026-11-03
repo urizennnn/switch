@@ -83,3 +83,37 @@ func TestEvidenceEventsAndUsage(t *testing.T) {
 		t.Fatalf("RunUsage = %+v", u)
 	}
 }
+
+func TestSessionsListsResumableSessions(t *testing.T) {
+	state, err := Open(filepath.Join(t.TempDir(), "switch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	ctx := context.Background()
+	for _, s := range []ChatSession{
+		{Project: "/p", Name: "lead", Agent: "opencode", SessionID: "old"},
+		{Project: "/p", Name: "builder-1", Agent: "claude", SessionID: "recent"},
+		{Project: "/p", Name: "lead", Agent: "opencode", SessionID: "empty"},
+		{Project: "/other", Name: "lead", Agent: "opencode", SessionID: "elsewhere"},
+	} {
+		if err := state.SaveChatSession(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = state.AppendMessage(ctx, "/p", "old", "user", "first question")
+	_ = state.AppendMessage(ctx, "/p", "old", "assistant", "answer")
+	_ = state.AppendMessage(ctx, "/p", "recent", "user", "latest question")
+	_ = state.AppendMessage(ctx, "/other", "elsewhere", "user", "not this project")
+
+	sessions, err := state.Sessions(ctx, "/p", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 2 || sessions[0].ID != "recent" || sessions[1].ID != "old" {
+		t.Fatalf("Sessions = %+v, want recent then old, no empty or other-project sessions", sessions)
+	}
+	if sessions[0].AgentName != "builder-1" || sessions[0].Driver != "claude" || sessions[1].Title != "first question" || sessions[1].Messages != 2 {
+		t.Fatalf("summaries = %+v", sessions)
+	}
+}

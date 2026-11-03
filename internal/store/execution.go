@@ -75,6 +75,15 @@ var executionTables = []string{
 		created_at TEXT NOT NULL
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_usage_run ON usage(run_id);`,
+	`CREATE TABLE IF NOT EXISTS session_history (
+		id TEXT PRIMARY KEY,
+		project TEXT NOT NULL,
+		agent_name TEXT NOT NULL DEFAULT '',
+		driver TEXT NOT NULL,
+		model TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_session_history_project ON session_history(project);`,
 }
 
 // executionColumns are added to tables created by older builds.
@@ -217,4 +226,47 @@ func (s *Store) RunUsage(ctx context.Context, runID string) (Usage, error) {
 		FROM usage WHERE run_id = ?`, runID).
 		Scan(&u.InputTokens, &u.OutputTokens, &u.TotalTokens)
 	return u, err
+}
+
+// SessionSummary describes a past chat session for the resume picker.
+type SessionSummary struct {
+	ID        string
+	AgentName string
+	Driver    string
+	Model     string
+	Title     string // the session's first user message
+	Messages  int
+	UpdatedAt time.Time // last message, or creation when empty
+}
+
+// Sessions lists a project's chat sessions that have messages, most recent
+// first.
+func (s *Store) Sessions(ctx context.Context, project string, limit int) ([]SessionSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT h.id, h.agent_name, h.driver, h.model,
+			coalesce((SELECT content FROM chat_messages m WHERE m.session_id = h.id AND m.role = 'user' ORDER BY m.id LIMIT 1), ''),
+			(SELECT count(*) FROM chat_messages m WHERE m.session_id = h.id) AS messages,
+			coalesce((SELECT max(created_at) FROM chat_messages m WHERE m.session_id = h.id), h.created_at),
+			(SELECT max(id) FROM chat_messages m WHERE m.session_id = h.id) AS latest
+		FROM session_history h
+		WHERE h.project = ? AND messages > 0
+		ORDER BY latest DESC
+		LIMIT ?`, project, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionSummary
+	for rows.Next() {
+		var summary SessionSummary
+		var updated string
+		var latest int64
+		if err := rows.Scan(&summary.ID, &summary.AgentName, &summary.Driver, &summary.Model,
+			&summary.Title, &summary.Messages, &updated, &latest); err != nil {
+			return nil, err
+		}
+		summary.UpdatedAt, _ = time.Parse(time.RFC3339, updated)
+		out = append(out, summary)
+	}
+	return out, rows.Err()
 }
