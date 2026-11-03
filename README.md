@@ -74,7 +74,7 @@ ln -s "$PWD/scripts/switch" ~/.local/bin/switch
 | `/log` | The run's audit log |
 | `/doctor` | Check config, rules, adapters, and state |
 | `/init` | Create `.switch` config and rules explicitly |
-| `/rules` | Show effective global/project rules |
+| `/rules` | Manage rule files; `/rules <agent>` shows what that agent gets |
 | `/session` | Show the current agent session |
 | `/lead <agent>` | Choose which configured agent leads and persist it |
 | `/adapters` | Install or uninstall ACP adapters (not during a run) |
@@ -105,8 +105,29 @@ ln -s "$PWD/scripts/switch" ~/.local/bin/switch
    never merges into your branches; merge the integration branch yourself.
 
 Chat with the lead stays available during a run. Run settings live under
-`[run]` in `.switch/config.toml`; role and task rules in
-`.switch/rules/roles/<role>.md` and `.switch/rules/tasks/<task>.md`.
+`[run]` in `.switch/config.toml`.
+
+### Rules
+
+Rules apply in three scopes; later ones win on conflict:
+
+| Scope | Files | For |
+|---|---|---|
+| Global | `~/.config/switch/rules.md`, `rules/roles/<role>.md`, `rules/agents/<agent>.md` | Your conventions in every project |
+| Project | `.switch/rules.md`, `.switch/rules/{roles,agents,tasks}/<name>.md` | The repository's rules, committed |
+| Local | `.switch/rules.local.md` | Your private rules for this repository |
+
+Each agent gets the base files plus its role, its own name, and (in a run) its
+task file. Whoever is leading gets `roles/lead.md`. `/rules` lists the files by
+scope and opens them in `$VISUAL`/`$EDITOR`; `/rules <agent>` shows exactly what
+that agent is given. HTML comments are notes and are never sent. Set
+`ignore_global = true` under `[rules]` to leave your global rules out of a
+project. Headless: `switch __control rules [list|show <agent>|path <file>|edit <file>]`.
+
+The lead is sent its rules with the first message of a session and again only
+when the files change. Project rules come from the repository, so the first
+time a project has rules you have not seen (or they change outside Switch), the
+TUI shows them before anything is sent; esc leaves them out for that session.
 
 The TUI uses one design system across the dashboard, conversation, modals, and
 command palette: shared colors, panels, section labels, input, and status bars.

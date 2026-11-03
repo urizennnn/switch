@@ -48,6 +48,8 @@ type Chat struct {
 	Session *acpdriver.Session
 	Grant   func(name string) ([]acp.McpServer, []string)
 	Context func(name string) string
+
+	rulesSent string // hash of the rules this session was last given
 }
 
 // Open creates or resumes the project chat session.
@@ -125,19 +127,52 @@ func Open(ctx context.Context, opts Options) (*Chat, Status, error) {
 	return chat, status, nil
 }
 
-// Send persists the user message, prepends the effective rules, and runs one
-// turn. Events stream on chat.Session.Events while it runs.
+// Send persists the user message and runs one turn. The lead's rules are
+// sent with the first message of a session and again whenever the files
+// change, not with every message. Events stream on chat.Session.Events while
+// it runs.
 func (c *Chat) Send(ctx context.Context, text string) (acp.PromptResponse, error) {
 	if err := c.Store.AppendMessage(ctx, c.Project, c.Session.ID, "user", text); err != nil {
 		return acp.PromptResponse{}, err
 	}
-	prompt := c.Rules.Prompt(text)
+	prompt, hash, err := c.withRules(text)
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
 	if c.Context != nil {
 		if team := c.Context(c.Name); team != "" {
 			prompt = team + "\n\n" + prompt
 		}
 	}
-	return c.Session.Prompt(ctx, prompt)
+	resp, err := c.Session.Prompt(ctx, prompt)
+	if err == nil {
+		c.rulesSent = hash
+	}
+	return resp, err
+}
+
+// EffectiveRules returns the rules the lead is given: base rules plus roles/lead.md
+// and this agent's own file, read fresh from disk.
+func (c *Chat) EffectiveRules() (rules.Set, error) {
+	return rules.Scoped(c.Rules, "lead", c.Name, "")
+}
+
+func (c *Chat) withRules(text string) (string, string, error) {
+	set, err := c.EffectiveRules()
+	if err != nil {
+		return "", "", err
+	}
+	hash := set.Hash()
+	switch {
+	case hash == c.rulesSent:
+		return text, hash, nil
+	case set.Empty():
+		return "Switch: the operating rules given earlier in this session no longer apply.\n\n" + text, hash, nil
+	case c.rulesSent != "":
+		return "Switch: your operating rules changed; these replace the earlier ones.\n\n" + set.Prompt(text), hash, nil
+	default:
+		return set.Prompt(text), hash, nil
+	}
 }
 
 func (c *Chat) SaveAssistant(ctx context.Context, text string) error {
@@ -214,6 +249,7 @@ func (c *Chat) Connect(ctx context.Context, name, driver, model string) (*Chat, 
 // started in the background. The current session is left open.
 func (c *Chat) Adopt(ctx context.Context, name string, session *acpdriver.Session) (*Chat, Status, error) {
 	next := *c
+	next.rulesSent = "" // a different session has not seen the rules
 	next.Session = session
 	next.Name = name
 	next.Agent = session.Agent

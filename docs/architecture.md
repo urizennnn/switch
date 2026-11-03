@@ -655,10 +655,23 @@ Phases 2–6 are implemented. Packages:
 
 ### Rules
 
-Precedence is global → project → local → role → task. Role rules are
-`.switch/rules/roles/<role>.md` (lead-only guidance goes in `lead.md`), task
-rules `.switch/rules/tasks/<task-id>.md`. Worker and review prompts use
-`rules.Scoped`, which rejects task IDs that would escape the rules directory.
+Precedence is global → project → local → role → agent → task; within the
+role and agent levels the global file (`~/.config/switch/rules/`) comes before
+the project one (`.switch/rules/`). Lead-only guidance goes in `roles/lead.md`;
+the chat lead is scoped as role `lead` whatever its configured role.
+`rules.Scoped` rereads the files on every call, so edits apply to the next
+prompt, and rejects names that would escape the rules directory. HTML comments
+are stripped. `ignore_global` in `[rules]` turns the global scope off.
+
+Chat sends the lead's rules once per session and again when their hash
+changes (with a note that they replace the earlier ones, or that they no
+longer apply). Worker and review prompts carry their rules on every turn.
+
+Project rules are untrusted input: the TUI keeps the hash of the project rule
+files the user accepted (`project_settings.trusted_rules`) and shows unseen
+ones before the first send. Declining drops project and local rules from chat,
+planning, and runs for that session. Edits made through `/rules` count as
+accepted.
 
 ### State added
 

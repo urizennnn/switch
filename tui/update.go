@@ -231,6 +231,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		if m.rulesReview != nil {
+			return m.handleRulesReviewKey(msg)
+		}
+
+		if m.rulesManager != nil {
+			return m.handleRulesManagerKey(msg)
+		}
+
 		if m.sessionPicker != nil {
 			return m.handleSessionPickerKey(msg)
 		}
@@ -382,6 +390,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.chat = msg.chat
+		m.chat.Rules = m.rules // the user may have declined project rules while it connected
 		m.status = msg.status
 		if m.project == "" {
 			m.project = m.chat.Project
@@ -407,6 +416,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		// The lead is up; start the rest of the team in the background.
 		return m, tea.Batch(append(m.warmCmds(), m.listen())...)
+
+	case editedMsg:
+		return m.handleEdited(msg)
 
 	case agentEventMsg:
 		if msg.gen != m.gen {
@@ -831,11 +843,11 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.refreshDashboard()
 
 	case "/rules":
-		if m.rules.Empty() {
-			m.setModal("rules", "no rules loaded")
-		} else {
-			m.setModal("rules", m.rules.Text())
+		if len(fields) > 1 {
+			m.previewRules(fields[1])
+			break
 		}
+		return m.openRulesManager()
 
 	case "/session":
 		info := fmt.Sprintf("lead: %s\ndriver: %s\nmodel: %s\nsession: %s (%s)", m.lead.Name, m.chat.Agent, m.chat.Model, m.chat.Session.ID, sessionState(m.status.Resumed))
@@ -861,7 +873,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		}
 		ctx := m.startJob("plan", "planning", true)
 		return m, tea.Batch(
-			startPlanCmd(ctx, m.project, goal, file, m.lead, m.jobStream),
+			startPlanCmd(ctx, m.project, goal, file, m.lead, m.rules, m.jobStream),
 			m.waitJob(),
 		)
 

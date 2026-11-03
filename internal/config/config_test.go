@@ -7,15 +7,19 @@ import (
 )
 
 func TestLoadOrInitCreatesProjectFiles(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
 	project := t.TempDir()
 
 	cfg, created, err := LoadOrInit(project)
 	if err != nil {
 		t.Fatalf("LoadOrInit: %v", err)
 	}
-	if len(created) != 2 {
-		t.Fatalf("created %d files, want 2: %#v", len(created), created)
+	if len(created) != 3 {
+		t.Fatalf("created %d files, want project config, project rules, global rules: %#v", len(created), created)
+	}
+	if _, err := os.Stat(filepath.Join(home, "switch", "rules.md")); err != nil {
+		t.Fatalf("global rules missing: %v", err)
 	}
 	if cfg.Agent != "opencode" {
 		t.Fatalf("agent = %q, want opencode", cfg.Agent)

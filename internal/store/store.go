@@ -294,6 +294,27 @@ func (s *Store) LeadAgent(ctx context.Context, project string) (string, bool, er
 	return name, true, nil
 }
 
+// SetTrustedRules records the hash of the project rules the user has seen
+// and accepted.
+func (s *Store) SetTrustedRules(ctx context.Context, project, hash string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO project_settings(project_path, trusted_rules)
+		VALUES(?, ?)
+		ON CONFLICT(project_path) DO UPDATE SET trusted_rules = excluded.trusted_rules`,
+		project, hash)
+	return err
+}
+
+func (s *Store) TrustedRules(ctx context.Context, project string) (string, error) {
+	var hash string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT trusted_rules FROM project_settings WHERE project_path = ?`, project).Scan(&hash)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return hash, err
+}
+
 func (s *Store) CreateRun(ctx context.Context, run Run) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO runs(id, project, goal, base_ref, integration_branch, integration_path, status, created_at)

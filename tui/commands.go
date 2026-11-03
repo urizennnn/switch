@@ -28,7 +28,7 @@ var slashCommands = []slashCommand{
 	{Name: "/log", Description: "run event log"},
 	{Name: "/doctor", Description: "check setup"},
 	{Name: "/init", Description: "create config"},
-	{Name: "/rules", Description: "show rules"},
+	{Name: "/rules", Description: "edit rule files; /rules <agent> shows what it gets"},
 	{Name: "/session", Description: "show session"},
 	{Name: "/lead", Args: "<agent>", Description: "choose the lead", NeedsArg: true},
 	{Name: "/adapters", Description: "manage ACP adapters"},

@@ -43,6 +43,9 @@ type RulesConfig struct {
 	Project string `toml:"project"`
 	Local   string `toml:"local"`
 	Inject  bool   `toml:"inject"`
+	// IgnoreGlobal leaves out the user's global rules, for a project whose
+	// conventions conflict with them.
+	IgnoreGlobal bool `toml:"ignore_global"`
 }
 
 func Defaults(projectDir string) Config {
@@ -118,6 +121,11 @@ func LoadOrInit(projectDir string) (Config, []string, error) {
 	if err != nil {
 		return Config{}, nil, err
 	}
+	global, err := EnsureGlobal()
+	if err != nil {
+		return Config{}, nil, err
+	}
+	created = append(created, global...)
 	cfg, err := Load(projectDir)
 	if err != nil {
 		return Config{}, nil, err
@@ -195,9 +203,12 @@ agent = "opencode"
 model = "opencode/deepseek-v4.1-flash-free"
 
 [rules]
-# Global rules are always applied. Project rules live next to this file.
-# Role and task rules: .switch/rules/roles/<role>.md, .switch/rules/tasks/<task>.md
+# Rules apply in order global -> project -> local; later ones win.
+# Project rules: .switch/rules.md, plus .switch/rules/roles/<role>.md,
+# .switch/rules/agents/<agent>.md and .switch/rules/tasks/<task>.md.
+# Personal rules for this project: .switch/rules.local.md (keep it out of git).
 inject = true
+# ignore_global = true   # leave out your global rules in this project
 
 [run]
 max_concurrency = 2   # tasks running at once
@@ -245,6 +256,31 @@ Guidance in this file applies only to this project.
 		created = append(created, rulesPath)
 	}
 	return created, nil
+}
+
+// EnsureGlobal creates the global rules file on first run. It starts as a
+// comment, which is never sent to agents.
+func EnsureGlobal() ([]string, error) {
+	path := filepath.Join(GlobalDir(), "rules.md")
+	if exists(path) {
+		return nil, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	content := `<!--
+Global rules for Switch. Rules here apply to every project you open with Switch. Project rules
+(.switch/rules.md) come after these and win when they conflict.
+
+Rules for one role or one agent go in rules/roles/<role>.md and
+rules/agents/<agent>.md next to this file. Comments like this one are
+never sent to agents.
+-->
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return nil, err
+	}
+	return []string{path}, nil
 }
 
 func GlobalDir() string {

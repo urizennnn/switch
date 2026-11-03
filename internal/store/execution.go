@@ -97,6 +97,7 @@ var executionColumns = []struct{ table, column, def string }{
 	{"tasks", "review", "TEXT NOT NULL DEFAULT ''"},
 	{"tasks", "last_error", "TEXT NOT NULL DEFAULT ''"},
 	{"tasks", "summary", "TEXT NOT NULL DEFAULT ''"},
+	{"project_settings", "trusted_rules", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func (s *Store) migrateExecution() error {

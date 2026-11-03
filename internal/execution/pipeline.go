@@ -72,7 +72,7 @@ func (e *Engine) process(ctx context.Context, task store.Task, agent store.RunAg
 
 // work runs the worker turn and records its session and usage.
 func (e *Engine) work(ctx context.Context, task *store.Task, agent store.RunAgent) error {
-	scoped, err := rules.Scoped(e.opts.Rules, e.run.Project, agent.Role, planID(task.ID))
+	scoped, err := rules.Scoped(e.opts.Rules, agent.Role, agent.Name, planID(task.ID))
 	if err != nil {
 		return err
 	}
@@ -118,7 +118,7 @@ func (e *Engine) leadReview(ctx context.Context, task store.Task, evidence strin
 	if err != nil {
 		return verdictUndecided, "lead review skipped: " + err.Error()
 	}
-	scoped, err := rules.Scoped(e.opts.Rules, e.run.Project, "lead", planID(task.ID))
+	scoped, err := rules.Scoped(e.opts.Rules, "lead", lead.Name, planID(task.ID))
 	if err != nil {
 		return verdictUndecided, "lead review skipped: " + err.Error()
 	}

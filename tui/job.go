@@ -12,6 +12,7 @@ import (
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/execution"
 	"github.com/urizennnn/switch/internal/planning"
+	"github.com/urizennnn/switch/internal/rules"
 	"github.com/urizennnn/switch/internal/runcli"
 )
 
@@ -162,7 +163,7 @@ func sendText(ctx context.Context, stream chan<- jobText, agent string) func(str
 	}
 }
 
-func startPlanCmd(ctx context.Context, project, goal, file string, lead config.Agent, stream chan<- jobText) tea.Cmd {
+func startPlanCmd(ctx context.Context, project, goal, file string, lead config.Agent, ruleSet rules.Set, stream chan<- jobText) tea.Cmd {
 	return func() tea.Msg {
 		defer close(stream)
 		planCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
@@ -174,6 +175,7 @@ func startPlanCmd(ctx context.Context, project, goal, file string, lead config.A
 			Lead:       &lead,
 			Permission: acpdriver.PermissionDeny,
 			OnText:     sendText(planCtx, stream, lead.Name),
+			Rules:      &ruleSet,
 		})
 		return planResultMsg{result: result, err: err}
 	}

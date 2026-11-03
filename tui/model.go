@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +72,9 @@ type model struct {
 	runConfig        config.RunConfig
 	taskPicker       *taskPicker
 	sessionPicker    *sessionPicker
+	rulesManager     *rulesManager
+	rulesReview      *rulesReview
+	rulesDeclined    bool   // project rules left out this session
 	zen              bool   // sidebar hidden
 	installing       string // adapter action running in the background
 	team             *team
@@ -121,6 +125,7 @@ func New(opts Options) model {
 	}
 	m.team = newTeam(m.project, m.dashboardFleet(), m.lead.Name)
 	m.listenStop = make(chan struct{})
+	m.reviewRules()
 	m.layout()
 	return m
 }
@@ -144,7 +149,14 @@ func dashboardTick() tea.Cmd {
 func (m *model) loadHistory() {
 	m.entries = nil
 	if len(m.created) > 0 {
-		m.appendSystem("initialized .switch/ config and rules")
+		names := make([]string, 0, len(m.created))
+		for _, path := range m.created {
+			if rel, err := filepath.Rel(m.project, path); err == nil && !strings.HasPrefix(rel, "..") {
+				path = rel
+			}
+			names = append(names, shortenHome(path))
+		}
+		m.appendSystem("created " + strings.Join(names, ", "))
 		m.created = nil
 	}
 	if m.chat == nil {

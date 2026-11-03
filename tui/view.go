@@ -40,6 +40,11 @@ func (m model) screen() string {
 			footer = "enter again to confirm · esc cancel"
 		}
 		return m.withModal(base, width, "ACP adapters", m.adapterPickerContent(width), footer)
+	case m.rulesReview != nil:
+		return m.withModal(base, width, "this project has rules", "Switch sends these to agents in this project. They come from the repository, so read them before they are used.\n\n"+m.rulesReview.text,
+			"enter use them · esc not this session")
+	case m.rulesManager != nil:
+		return m.withModal(base, width, "rules", m.rulesManagerContent(min(82, max(44, width*2/3))), rulesManagerFooter(m.rulesManager))
 	case m.sessionPicker != nil:
 		return m.withModal(base, width, "resume a session", m.sessionPickerContent(min(82, max(44, width*2/3))), "↑/↓ select · enter resume · esc cancel")
 	case m.taskPicker != nil:

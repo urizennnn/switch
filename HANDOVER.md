@@ -377,7 +377,7 @@ Tasks:
 
 ### Milestone G — Rules and context scopes
 
-**Status:** DONE. `rules.Scoped`: global → project → local → role → task; lead-only rules in `roles/lead.md`; tests for precedence, missing files, and path traversal. The effective rules per role are visible only in prompts; a `/rules <role>` view is not built.
+**Status:** DONE. `rules.Scoped`: global → project → local → role → task; lead-only rules in `roles/lead.md`; tests for precedence, missing files, and path traversal. Later: agent scope, global role/agent files, `/rules` manager with `$EDITOR`, `/rules <agent>` effective view, rules sent once per chat session, project-rule review, `ignore_global`, `__control rules`.
 
 **Goal:** apply the right instructions to the right role and task.
 
@@ -525,8 +525,6 @@ sqlite3 ~/.local/state/switch/switch.db \
 
 ## 11. What is left
 
-- An effective-rules view per role/task (`/rules <role>`).
 - Answering worker permission requests over the control socket for headless runs (headless is allow/deny only).
-- Adapter prewarming for cold-start latency.
 - Merging or pushing the completed integration branch is deliberately manual.
 

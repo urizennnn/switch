@@ -17,6 +17,7 @@ import (
 	"github.com/urizennnn/switch/internal/plancli"
 	"github.com/urizennnn/switch/internal/probe"
 	"github.com/urizennnn/switch/internal/rules"
+	"github.com/urizennnn/switch/internal/rulescli"
 	"github.com/urizennnn/switch/internal/runcli"
 	"github.com/urizennnn/switch/internal/store"
 	buildversion "github.com/urizennnn/switch/internal/version"
@@ -62,7 +63,7 @@ func trackAdapters() {
 // automation, and tests until the Unix-socket control plane lands.
 func control(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "internal control: chat, plan, run, tasks, approve, reject, retry, diff, log, agent, mcp, probe, doctor, init")
+		fmt.Fprintln(os.Stderr, "internal control: chat, plan, run, tasks, approve, reject, retry, diff, log, agent, mcp, probe, doctor, init, rules")
 		return 2
 	}
 	switch args[0] {
@@ -82,6 +83,8 @@ func control(args []string) int {
 		return doctor.Run(args[1:])
 	case "init":
 		return initcmd.Run(args[1:])
+	case "rules":
+		return rulescli.Run(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "internal control: unknown command %q\n", args[0])
 		return 2

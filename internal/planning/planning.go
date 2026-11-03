@@ -29,6 +29,9 @@ type Options struct {
 	Permission acpdriver.PermissionMode
 	AgentLogs  io.Writer
 	OnText     func(string)
+	// Rules overrides the project's rules, for a caller that has already
+	// loaded them (and may have left out untrusted project rules).
+	Rules *rules.Set
 }
 
 type Result struct {
@@ -86,7 +89,13 @@ func Execute(ctx context.Context, opts Options) (*Result, error) {
 		lead.Model = "opencode/deepseek-v4.1-flash-free"
 	}
 
-	ruleSet, err := rules.Load(cfg.Rules)
+	var loaded rules.Set
+	if opts.Rules != nil {
+		loaded = *opts.Rules
+	} else if loaded, err = rules.Load(cfg.Rules); err != nil {
+		return nil, err
+	}
+	ruleSet, err := rules.Scoped(loaded, "lead", lead.Name, "")
 	if err != nil {
 		return nil, err
 	}
