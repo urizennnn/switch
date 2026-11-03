@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/store"
 )
@@ -153,39 +154,33 @@ func (m model) bodyView(width int) string {
 func (m model) sidebarContent(width int) string {
 	var b strings.Builder
 
-	b.WriteString(section("agents"))
-	for _, agent := range m.dashboardFleet() {
-		active := agent.Name == m.lead.Name
-		marker := dimStyle.Render("○")
-		nameStyle := textStyle
-		if active {
-			marker = brandStyle.Render("●")
-			nameStyle = textStyle.Bold(true)
-		}
-		name := fmt.Sprintf("%-10s", truncate(agent.Name, 10))
-		state := "idle"
-		switch label := m.roleLabel(agent); {
-		case label != agent.Role || active:
-			state = label // leading or standby
-		default:
+	inner := max(10, width-4) // inside the panel border and padding
+
+	// Exactly one agent is shown as the lead.
+	b.WriteString(section("lead"))
+	b.WriteString(brandStyle.Render("● ") + textStyle.Bold(true).Render(truncate(m.lead.Name, inner-2)))
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render("  " + truncate(m.leadDetail(), inner-2)))
+	b.WriteString("\n")
+
+	// Workers take tasks. An agent configured as lead that is not leading
+	// cannot, so it is left out; /lead still offers it.
+	if workers := m.workers(); len(workers) > 0 {
+		b.WriteString("\n")
+		b.WriteString(section("workers"))
+		for _, agent := range workers {
+			state, stateStyle := "idle", dimStyle
 			if task, ok := m.agentTask(agent.Name); ok {
-				state = truncate(shortTaskID(task.ID), 12)
+				state, stateStyle = shortTaskID(task.ID), warningStyle
 			}
+			state = truncate(state, max(4, inner/2))
+			name := truncate(agent.Name, max(4, inner-2-lipgloss.Width(state)-1))
+			gap := max(1, inner-2-lipgloss.Width(name)-lipgloss.Width(state))
+			b.WriteString(dimStyle.Render("○ ") + textStyle.Render(name) + strings.Repeat(" ", gap) + stateStyle.Render(state))
+			b.WriteString("\n")
+			b.WriteString(dimStyle.Render("  " + truncate(agent.Role+" · "+agent.Driver, inner-2)))
+			b.WriteString("\n")
 		}
-		line := marker + " " + nameStyle.Render(name) + " " + mutedStyle.Render(state)
-		if active {
-			line = selectedStyle.Width(max(10, width-4)).Render(line)
-		}
-		b.WriteString(line)
-		b.WriteString("\n")
-		// The status column already says leading/standby; only workers need
-		// their role spelled out.
-		detail := agent.Driver
-		if m.roleLabel(agent) == agent.Role {
-			detail = agent.Role + " · " + agent.Driver
-		}
-		b.WriteString(dimStyle.Render("  " + truncate(detail, width-6)))
-		b.WriteString("\n")
 	}
 
 	b.WriteString("\n")
@@ -258,7 +253,6 @@ func (m model) mainContent(width, height int) string {
 func (m model) overviewContent(width int) string {
 	var b strings.Builder
 
-	driver := m.lead.Driver
 	model := m.lead.Model
 	if m.chat != nil && m.chat.Agent == m.lead.Driver && m.chat.Model != "" {
 		model = m.chat.Model
@@ -266,35 +260,41 @@ func (m model) overviewContent(width int) string {
 	if model == "" {
 		model = "default"
 	}
-	b.WriteString(section("lead"))
-	b.WriteString(keyValue("agent", m.lead.Name))
-	b.WriteString("\n")
-	if adapterSource(driver) == "npx" {
-		// npx resolves the package on every start, which is the slow part.
-		driver += dimStyle.Render("  via npx · /adapters installs it for faster starts")
-	}
-	b.WriteString(keyValue("driver", driver))
-	b.WriteString("\n")
-	b.WriteString(keyValue("model", model))
-	b.WriteString("\n")
-	sessionLabel := "connecting…"
+	session := "connecting…"
 	switch {
 	case m.chat == nil && m.connectErr != nil:
-		sessionLabel = "not connected"
+		session = "not connected"
 	case m.chat != nil && m.state != "starting lead":
-		sessionLabel = shortID(m.chat.Session.ID) + " (" + sessionState(m.status.Resumed) + ")"
+		session = shortID(m.chat.Session.ID) + " (" + sessionState(m.status.Resumed) + ")"
 	}
-	b.WriteString(keyValue("session", sessionLabel))
-	b.WriteString("\n")
 
-	b.WriteString("\n")
-	b.WriteString(section("commands"))
-	for _, command := range slashCommands {
-		label := truncate(command.label(), 26)
-		desc := truncate(command.Description, max(0, width-32))
-		b.WriteString(commandRow(label, desc))
+	b.WriteString(section("lead"))
+	for _, row := range [][2]string{{"agent", m.lead.Name}, {"driver", m.lead.Driver}, {"model", model}, {"session", session}} {
+		b.WriteString(alignedValue(row[0], truncate(row[1], max(10, width-14))))
 		b.WriteString("\n")
 	}
+	if adapterSource(m.lead.Driver) == "npx" {
+		// npx resolves the package on every start, which is the slow part.
+		b.WriteString(dimStyle.Render(truncate("tip: /adapters installs "+m.lead.Driver+" so it starts faster", max(10, width-4))))
+		b.WriteString("\n")
+	}
+
+	if m.run != nil {
+		queued, active, review, merged, blocked := m.taskCounts()
+		b.WriteString("\n")
+		b.WriteString(section("run"))
+		b.WriteString(alignedValue("status", m.run.Status))
+		b.WriteString("\n")
+		b.WriteString(alignedValue("tasks", fmt.Sprintf("%d queued · %d active · %d review · %d merged · %d blocked", queued, active, review, merged, blocked)))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(section("get started"))
+	b.WriteString(mutedStyle.Render(truncate("Type a message to talk to "+m.lead.Name+".", max(10, width-4))))
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render(truncate("/plan <goal> plans work for the team · / shows every command", max(10, width-4))))
+	b.WriteString("\n")
 
 	b.WriteString("\n")
 	b.WriteString(section("keys"))
@@ -302,7 +302,6 @@ func (m model) overviewContent(width int) string {
 		b.WriteString(mutedStyle.Render(line))
 		b.WriteString("\n")
 	}
-
 	return b.String()
 }
 
@@ -488,4 +487,36 @@ func adapterSource(name string) string {
 		}
 	}
 	return ""
+}
+
+// alignedValue renders a key-value row with keys in one column.
+func alignedValue(key, value string) string {
+	return mutedStyle.Render(fmt.Sprintf("%-8s", key)) + " " + textStyle.Render(value)
+}
+
+// leadDetail is the lead's driver and short model name.
+func (m model) leadDetail() string {
+	model := m.lead.Model
+	if m.chat != nil && m.chat.Agent == m.lead.Driver && m.chat.Model != "" {
+		model = m.chat.Model
+	}
+	if i := strings.LastIndex(model, "/"); i >= 0 {
+		model = model[i+1:]
+	}
+	if model == "" {
+		return m.lead.Driver
+	}
+	return m.lead.Driver + " · " + model
+}
+
+// workers are the agents that can take tasks: not the lead, and not an agent
+// configured only to lead.
+func (m model) workers() []config.Agent {
+	var out []config.Agent
+	for _, agent := range m.dashboardFleet() {
+		if agent.Name != m.lead.Name && agent.Role != "lead" {
+			out = append(out, agent)
+		}
+	}
+	return out
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/lipgloss/v2"
 	"github.com/urizennnn/switch/internal/chat"
 	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
@@ -84,5 +85,31 @@ func TestResumedShowsThatSessionAndReportsFallback(t *testing.T) {
 	m = next.(model)
 	if !strings.Contains(m.modal, "new one was started") || len(m.entries) != 0 {
 		t.Fatalf("fallback: modal=%q entries=%d", m.modal, len(m.entries))
+	}
+}
+
+func TestSidebarShowsOneLead(t *testing.T) {
+	m := model{
+		lead: config.Agent{Name: "builder-1", Role: "builder", Driver: "claude", Model: "sonnet"},
+		fleet: []config.Agent{
+			{Name: "lead", Role: "lead", Driver: "opencode"},
+			{Name: "builder-1", Role: "builder", Driver: "claude"},
+			{Name: "builder-2", Role: "builder", Driver: "codex"},
+		},
+	}
+	out := m.sidebarContent(30)
+	if strings.Count(out, "●") != 1 || !strings.Contains(out, "builder-1") || !strings.Contains(out, "claude · sonnet") {
+		t.Fatalf("lead section wrong:\n%s", out)
+	}
+	if strings.Contains(out, "opencode") || strings.Contains(out, "standby") {
+		t.Fatalf("an agent that is not leading is shown as a lead:\n%s", out)
+	}
+	if !strings.Contains(out, "builder-2") || !strings.Contains(out, "WORKERS") {
+		t.Fatalf("worker missing:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(line); w > 26 {
+			t.Fatalf("line wider than the panel (%d): %q", w, line)
+		}
 	}
 }

@@ -69,10 +69,6 @@ func section(title string) string {
 	return titleStyle.Render(strings.ToUpper(title)) + "\n"
 }
 
-func keyValue(key, value string) string {
-	return mutedStyle.Render(key) + "  " + textStyle.Render(value)
-}
-
 func commandRow(label, description string) string {
 	return labelStyle.Render(fmt.Sprintf("%-26s", label)) + " " + mutedStyle.Render(description)
 }
