@@ -43,3 +43,6 @@ vendor/
 # Ignore venv
 myenv/
 venv/
+
+# Switch project config generated for local development
+.switch/
