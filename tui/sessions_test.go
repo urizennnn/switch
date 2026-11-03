@@ -17,8 +17,8 @@ import (
 func TestZenHidesSidebar(t *testing.T) {
 	m := New(Options{Context: context.Background(), Project: "/p", Lead: config.Agent{Name: "lead", Driver: "opencode"}})
 	m.width, m.height = 120, 30
-	if !strings.Contains(m.View().Content, "WORKSPACE") {
-		t.Fatal("sidebar missing before zen")
+	if v := m.View(); !strings.Contains(v.Content, "WORKSPACE") || !v.AltScreen {
+		t.Fatal("sidebar missing before zen, or not in the alternate screen")
 	}
 	m.toggleZen()
 	side, main := m.paneWidths(120)

@@ -11,7 +11,15 @@ import (
 	"github.com/urizennnn/switch/internal/store"
 )
 
+// View draws the TUI in the terminal's alternate screen, so it starts on a
+// clean screen and leaves the shell's scrollback untouched on exit.
 func (m model) View() tea.View {
+	v := tea.NewView(m.screen())
+	v.AltScreen = true
+	return v
+}
+
+func (m model) screen() string {
 	width := m.width
 	if width <= 0 {
 		width = 80
@@ -31,19 +39,19 @@ func (m model) View() tea.View {
 		if m.adapterPicker.pending != "" {
 			footer = "enter again to confirm · esc cancel"
 		}
-		return tea.NewView(m.withModal(base, width, "ACP adapters", m.adapterPickerContent(width), footer))
+		return m.withModal(base, width, "ACP adapters", m.adapterPickerContent(width), footer)
 	case m.sessionPicker != nil:
-		return tea.NewView(m.withModal(base, width, "resume a session", m.sessionPickerContent(min(82, max(44, width*2/3))), "↑/↓ select · enter resume · esc cancel"))
+		return m.withModal(base, width, "resume a session", m.sessionPickerContent(min(82, max(44, width*2/3))), "↑/↓ select · enter resume · esc cancel")
 	case m.taskPicker != nil:
-		return tea.NewView(m.withModal(base, width, "tasks", m.taskPickerContent(min(82, max(44, width*2/3))), "enter details · a approve · r reject · d diff · t retry · esc"))
+		return m.withModal(base, width, "tasks", m.taskPickerContent(min(82, max(44, width*2/3))), "enter details · a approve · r reject · d diff · t retry · esc")
 	case m.picker != nil:
-		return tea.NewView(m.withModal(base, width, "choose lead", m.pickerContent(width), "↑/↓ select · enter choose · esc cancel"))
+		return m.withModal(base, width, "choose lead", m.pickerContent(width), "↑/↓ select · enter choose · esc cancel")
 	case m.modal != "":
-		return tea.NewView(m.withModal(base, width, m.modalTitle, m.modal, "esc or enter to close"))
+		return m.withModal(base, width, m.modalTitle, m.modal, "esc or enter to close")
 	}
 
 	if !m.paletteOpen {
-		return tea.NewView(base)
+		return base
 	}
 
 	sidebarWidth, mainWidth := m.paneWidths(width)
@@ -60,7 +68,7 @@ func (m model) View() tea.View {
 		lipgloss.NewLayer(base).X(0).Y(0).Z(0),
 		lipgloss.NewLayer(palette).X(x).Y(y).Z(1),
 	)
-	return tea.NewView(comp.Render())
+	return comp.Render()
 }
 
 func (m model) withModal(base string, screenWidth int, title, content, footer string) string {
