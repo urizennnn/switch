@@ -88,3 +88,17 @@ func TestConfigOptions(t *testing.T) {
 		t.Fatalf("configValue(model) = %q", configValue(got, "model"))
 	}
 }
+
+func TestOpenClawQuirks(t *testing.T) {
+	adapter, err := ResolveAdapter("openclaw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Its ACP bridge rejects session MCP servers and resumes only by key.
+	if !adapter.NoSessionMCP || adapter.SessionKeyPrefix != "acp-bridge:" {
+		t.Fatalf("openclaw quirks = %+v", adapter)
+	}
+	if other, _ := ResolveAdapter("codex"); other.NoSessionMCP || other.SessionKeyPrefix != "" {
+		t.Fatalf("codex has openclaw quirks: %+v", other)
+	}
+}

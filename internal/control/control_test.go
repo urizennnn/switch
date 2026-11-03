@@ -194,3 +194,29 @@ func TestMCPBridge(t *testing.T) {
 		t.Fatalf("unknown method = %v", replies[4])
 	}
 }
+
+func TestSocketInUseIsRefused(t *testing.T) {
+	dir, err := os.MkdirTemp("", "swc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	first, err := Listen(Options{RunID: "run", StateDir: dir, Executable: "/bin/switch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, err := Listen(Options{RunID: "run", StateDir: dir, Executable: "/bin/switch"}); err == nil || !strings.Contains(err.Error(), "in use") {
+		t.Fatalf("second Listen err = %v, want in use", err)
+	}
+	if _, err := os.Stat(first.Path); err != nil {
+		t.Fatalf("first socket removed: %v", err)
+	}
+	// A stale socket file with no listener is replaced.
+	first.Close()
+	stale, err := Listen(Options{RunID: "run", StateDir: dir, Executable: "/bin/switch"})
+	if err != nil {
+		t.Fatalf("Listen after close: %v", err)
+	}
+	stale.Close()
+}

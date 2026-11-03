@@ -59,6 +59,7 @@ type Server struct {
 	exe      string
 	onText   func(agent, text string)
 	listener net.Listener
+	created  os.FileInfo // the socket file this server made
 
 	mu     sync.Mutex
 	tokens map[string]identity
@@ -89,18 +90,32 @@ func Listen(opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = os.Remove(path) // a stale socket from a crashed process
+	// Replace only a stale socket from a crashed process; a live one belongs
+	// to the process driving this run.
+	if conn, err := net.DialTimeout("unix", path, time.Second); err == nil {
+		conn.Close()
+		return nil, fmt.Errorf("%w: its control socket is in use", execution.ErrRunBusy)
+	}
+	_ = os.Remove(path)
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		return nil, fmt.Errorf("control socket: %w", err)
 	}
+	// The listener must not unlink the path on close: by then it may belong
+	// to another process. Close removes it only if it is still ours.
+	listener.(*net.UnixListener).SetUnlinkOnClose(false)
 	if err := os.Chmod(path, 0o600); err != nil {
+		listener.Close()
+		return nil, err
+	}
+	created, err := os.Stat(path)
+	if err != nil {
 		listener.Close()
 		return nil, err
 	}
 	s := &Server{
 		Path: path, store: opts.Store, runID: opts.RunID, exe: exe, onText: opts.OnText,
-		listener: listener, tokens: map[string]identity{}, blocks: map[string]string{},
+		listener: listener, created: created, tokens: map[string]identity{}, blocks: map[string]string{},
 	}
 	s.wg.Add(1)
 	go s.serve()
@@ -110,14 +125,10 @@ func Listen(opts Options) (*Server, error) {
 // socketPath is <state>/runs/<id>/control.sock, or a temp path when that
 // exceeds the Unix socket path limit (104 bytes on macOS).
 func socketPath(stateDir, runID string) (string, error) {
-	short := runID
-	if len(short) > 8 {
-		short = short[:8]
-	}
-	dir := filepath.Join(stateDir, "runs", short)
+	dir := execution.RunDir(stateDir, runID)
 	path := filepath.Join(dir, "control.sock")
 	if len(path) > 100 {
-		dir = filepath.Join(os.TempDir(), fmt.Sprintf("switch-%d-%s", os.Getuid(), short))
+		dir = filepath.Join(os.TempDir(), fmt.Sprintf("switch-%d-%s", os.Getuid(), filepath.Base(dir)))
 		path = filepath.Join(dir, "control.sock")
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -129,7 +140,9 @@ func socketPath(stateDir, runID string) (string, error) {
 func (s *Server) Close() error {
 	err := s.listener.Close()
 	s.wg.Wait()
-	_ = os.Remove(s.Path)
+	if current, statErr := os.Stat(s.Path); statErr == nil && os.SameFile(current, s.created) {
+		_ = os.Remove(s.Path)
+	}
 	return err
 }
 

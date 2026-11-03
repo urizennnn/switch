@@ -56,6 +56,9 @@ type TurnRequest struct {
 	Permission acpdriver.PermissionMode
 	// Ask routes permission requests to Options.OnPermission when set.
 	Ask bool
+	// Ephemeral ends the agent session after the turn; worker sessions stay
+	// resumable for retries.
+	Ephemeral bool
 }
 
 type TurnResult struct {
@@ -77,6 +80,9 @@ type Options struct {
 	// WaitForReview keeps Run alive while tasks wait for approval, so a TUI
 	// can approve them. Headless callers return instead.
 	WaitForReview bool
+	// Poll rechecks the store this often while waiting, for approvals made
+	// by another process (a detached run approved from the TUI).
+	Poll time.Duration
 	// Permission answers worker requests when OnPermission is nil.
 	Permission   acpdriver.PermissionMode
 	OnPermission func(*acpdriver.PermissionRequest)
@@ -163,6 +169,11 @@ func New(ctx context.Context, opts Options) (*Engine, error) {
 // outcome; a cancelled context interrupts running tasks and returns
 // RunStopped with the context error.
 func (e *Engine) Run(ctx context.Context) (string, error) {
+	lock, err := LockRun(e.opts.StateDir, e.run.ID)
+	if err != nil {
+		return "", err
+	}
+	defer lock.Release()
 	if err := e.recover(); err != nil {
 		return "", err
 	}
@@ -190,6 +201,8 @@ func (e *Engine) Run(ctx context.Context) (string, error) {
 			if outcome == RunWaiting && e.opts.WaitForReview {
 				select {
 				case <-e.wake:
+					continue
+				case <-e.pollTick():
 					continue
 				case <-ctx.Done():
 					e.setRunStatus(RunStopped)
@@ -425,6 +438,14 @@ func (e *Engine) setRunStatus(status string) {
 	defer cancel()
 	_ = e.opts.Store.SetRunStatus(ctx, e.run.ID, status)
 	e.log(ctx, "", "", "run", status)
+}
+
+// pollTick fires after Poll, or never when polling is off.
+func (e *Engine) pollTick() <-chan time.Time {
+	if e.opts.Poll <= 0 {
+		return nil
+	}
+	return time.After(e.opts.Poll)
 }
 
 func (e *Engine) signal() {

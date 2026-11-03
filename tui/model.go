@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
@@ -70,6 +71,7 @@ type model struct {
 	engine           *execution.Engine
 	runConfig        config.RunConfig
 	taskPicker       *taskPicker
+	runOwner         int // PID of another process driving the run, such as a detached run
 	picker           *leadPicker
 	adapterPicker    *adapterPicker
 	run              *store.Run
@@ -118,7 +120,15 @@ func New(opts Options) model {
 
 // Init renders the shell immediately and connects the lead in the background.
 func (m model) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, m.connectCmd())
+	return tea.Batch(textinput.Blink, m.connectCmd(), dashboardTick())
+}
+
+type dashboardTickMsg struct{}
+
+// dashboardTick refreshes run state written by other processes: a detached
+// run, or a headless run in another terminal.
+func dashboardTick() tea.Cmd {
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return dashboardTickMsg{} })
 }
 
 func (m model) initialTranscript() string {
@@ -243,6 +253,12 @@ func (m *model) refreshDashboard() {
 	m.run = &run
 	m.tasks, _ = m.store.TasksForRun(m.ctx, run.ID)
 	m.runAgents, _ = m.store.RunAgents(m.ctx, run.ID)
+	m.runOwner = 0
+	if m.job != "run" {
+		if pid, ok := execution.RunOwner(config.StateDir(), run.ID); ok {
+			m.runOwner = pid
+		}
+	}
 }
 
 func (m model) dashboardFleet() []config.Agent {

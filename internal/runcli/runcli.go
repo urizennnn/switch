@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/control"
@@ -31,18 +33,26 @@ func Run(command string, args []string) int {
 	runID := fs.String("run", "", "run ID (default: the project's latest run)")
 	permission := fs.String("permission", "deny", "worker permission mode for run: allow or deny")
 	agentLogs := fs.Bool("agent-logs", false, "stream adapter stderr")
+	detach := fs.Bool("detach", false, "run: keep running in the background after this command exits")
+	wait := fs.Bool("wait", false, "run: keep waiting while tasks wait for review, polling for approvals")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if err := run(command, fs.Args(), *cwd, *runID, *permission, *agentLogs); err != nil {
+	if err := run(command, fs.Args(), flags{cwd: *cwd, runID: *runID, permission: *permission, agentLogs: *agentLogs, detach: *detach, wait: *wait}); err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", command, err)
 		return 1
 	}
 	return 0
 }
 
-func run(command string, args []string, cwd, runID, permission string, agentLogs bool) error {
-	project, err := filepath.Abs(cwd)
+type flags struct {
+	cwd, runID, permission  string
+	agentLogs, detach, wait bool
+}
+
+func run(command string, args []string, f flags) error {
+	runID, permission, agentLogs := f.runID, f.permission, f.agentLogs
+	project, err := filepath.Abs(f.cwd)
 	if err != nil {
 		return err
 	}
@@ -60,7 +70,7 @@ func run(command string, args []string, cwd, runID, permission string, agentLogs
 	}
 	defer state.Close()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if runID == "" {
@@ -88,7 +98,19 @@ func run(command string, args []string, cwd, runID, permission string, agentLogs
 		if err != nil || mode == acpdriver.PermissionAsk {
 			return errors.New("--permission must be allow or deny headless")
 		}
+		if f.detach {
+			pid, logPath, err := Detach(project, config.StateDir(), runID, string(mode))
+			if err != nil {
+				return err
+			}
+			fmt.Printf("run %s is running in the background (pid %d)\nlog: %s\nstatus: switch __control status · stop: switch __control stop\n", shortID(runID), pid, logPath)
+			return nil
+		}
 		opts.Permission = mode
+		if f.wait {
+			opts.WaitForReview = true
+			opts.Poll = 2 * time.Second
+		}
 		if agentLogs {
 			opts.AgentLogs = os.Stderr
 		}
@@ -126,6 +148,41 @@ func run(command string, args []string, cwd, runID, permission string, agentLogs
 				fmt.Printf("%16s last error: %s\n", "", firstLine(task.LastError))
 			}
 		}
+		return nil
+
+	case "status":
+		run, _, err := state.GetRun(ctx, runID)
+		if err != nil {
+			return err
+		}
+		tasks, err := state.TasksForRun(ctx, runID)
+		if err != nil {
+			return err
+		}
+		counts := map[string]int{}
+		for _, task := range tasks {
+			counts[task.Status]++
+		}
+		owner := "not running"
+		if pid, ok := execution.RunOwner(config.StateDir(), runID); ok {
+			owner = fmt.Sprintf("driven by pid %d", pid)
+		}
+		fmt.Printf("run %s  %s  (%s)\n", shortID(runID), run.Status, owner)
+		fmt.Printf("goal: %s\nintegration: %s\n", run.Goal, run.IntegrationBranch)
+		var parts []string
+		for _, status := range []string{"queued", "interrupted", "running", "verifying", "reviewing", "review", "approved", "merged", "blocked"} {
+			if counts[status] > 0 {
+				parts = append(parts, fmt.Sprintf("%s %d", status, counts[status]))
+			}
+		}
+		fmt.Printf("tasks: %s\n", strings.Join(parts, " · "))
+		return nil
+
+	case "stop":
+		if err := Stop(config.StateDir(), runID); err != nil {
+			return err
+		}
+		fmt.Printf("run %s stopped\n", shortID(runID))
 		return nil
 
 	case "log":

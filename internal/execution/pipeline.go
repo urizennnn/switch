@@ -130,6 +130,7 @@ func (e *Engine) leadReview(ctx context.Context, task store.Task, evidence strin
 		Cwd:        task.Worktree,
 		Prompt:     ReviewPrompt(task, diff, evidence, scoped),
 		Permission: acpdriver.PermissionDeny, // reviewers read; they do not edit
+		Ephemeral:  true,
 	})
 	e.recordTurn(task, lead, result)
 	if err != nil {

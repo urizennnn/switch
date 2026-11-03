@@ -29,6 +29,7 @@ func Run(args []string) int {
 	verbose := fs.Bool("verbose", false, "show thoughts, tool status updates, and plans")
 	agentLogs := fs.Bool("agent-logs", false, "stream adapter stderr to the terminal")
 	noPrompt := fs.Bool("no-prompt", false, "connect and report capabilities without prompting")
+	closeSession := fs.Bool("close", false, "end the session on the agent when done (it cannot be resumed)")
 	list := fs.Bool("list", false, "list known adapters and local availability")
 
 	if err := fs.Parse(args); err != nil {
@@ -74,6 +75,7 @@ func Run(args []string) int {
 		Verbose:    *verbose,
 		AgentLogs:  *agentLogs,
 		NoPrompt:   *noPrompt,
+		Close:      *closeSession,
 		Stdin:      os.Stdin,
 		Stdout:     os.Stdout,
 		Stderr:     os.Stderr,

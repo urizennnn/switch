@@ -16,6 +16,7 @@ var slashCommands = []slashCommand{
 	{Name: "/plan", Args: "<goal>", Description: "plan a run", NeedsArg: true},
 	{Name: "/plan --file", Args: "<path>", Description: "import plan JSON", NeedsArg: true},
 	{Name: "/run", Description: "start or resume the run"},
+	{Name: "/run --detach", Args: "[--allow]", Description: "run in the background"},
 	{Name: "/stop", Description: "stop the run"},
 	{Name: "/tasks", Description: "tasks: details, approve, reject, diff"},
 	{Name: "/review", Description: "tasks waiting for approval"},

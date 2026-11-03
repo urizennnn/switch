@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/execution"
 	"github.com/urizennnn/switch/internal/planning"
+	"github.com/urizennnn/switch/internal/runcli"
 )
 
 // A job is background agent work outside the chat: /plan or /run. Its output
@@ -251,5 +253,32 @@ func runOutcomeText(outcome string, err error) string {
 		return "stopped by the run budget (max_turns or max_tokens in .switch/config.toml)."
 	default:
 		return "run " + outcome
+	}
+}
+
+type detachMsg struct {
+	title string
+	body  string
+}
+
+// detachCmd starts the run in a background process that outlives the TUI.
+// It cannot ask for permissions, so the user picks allow or deny up front.
+func detachCmd(project, runID, permission string) tea.Cmd {
+	return func() tea.Msg {
+		pid, logPath, err := runcli.Detach(project, config.StateDir(), runID, permission)
+		if err != nil {
+			return detachMsg{title: "detach failed", body: err.Error()}
+		}
+		return detachMsg{title: "run detached", body: fmt.Sprintf(
+			"pid %d is driving the run (worker permissions: %s)\nlog: %s\n\nIt keeps going after you quit.\n/tasks and /review approve its work · /stop stops it", pid, permission, logPath)}
+	}
+}
+
+func stopDetachedCmd(runID string) tea.Cmd {
+	return func() tea.Msg {
+		if err := runcli.Stop(config.StateDir(), runID); err != nil {
+			return detachMsg{title: "stop failed", body: err.Error()}
+		}
+		return detachMsg{title: "run stopped", body: "the background run stopped; running tasks were interrupted.\n/run resumes them."}
 	}
 }

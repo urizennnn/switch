@@ -66,7 +66,7 @@ func control(args []string) int {
 		return 2
 	}
 	switch args[0] {
-	case "run", "tasks", "approve", "reject", "retry", "diff", "log":
+	case "run", "status", "stop", "tasks", "approve", "reject", "retry", "diff", "log":
 		return runcli.Run(args[0], args[1:])
 	case "agent":
 		return controlplane.RunAgentCLI(args[1:], os.Stdout, os.Stderr)

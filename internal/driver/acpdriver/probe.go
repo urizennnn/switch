@@ -3,6 +3,7 @@ package acpdriver
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +32,9 @@ type ProbeOptions struct {
 	Verbose    bool
 	AgentLogs  bool
 	NoPrompt   bool
+	// Close ends the session on the agent when done. Some adapters (OpenClaw)
+	// delete closed sessions, so leave it off to resume with --session later.
+	Close bool
 
 	Stdin  io.Reader
 	Stdout io.Writer
@@ -216,7 +220,7 @@ func Probe(ctx context.Context, opts ProbeOptions) error {
 		printReport(opts.Stdout, report)
 	}
 
-	session, err := openSession(ctx, conn, initResp, cwd, opts.SessionID, nil)
+	session, err := openSession(ctx, conn, initResp, opts.Agent, cwd, opts.SessionID, nil)
 	if err != nil {
 		_ = closeSession(ctx, conn, initResp, "")
 		stop()
@@ -269,7 +273,9 @@ func Probe(ctx context.Context, opts ProbeOptions) error {
 	}
 
 	if opts.NoPrompt {
-		_ = closeSession(ctx, conn, initResp, session.ID)
+		if opts.Close {
+			_ = closeSession(ctx, conn, initResp, session.ID)
+		}
 		stop()
 		return nil
 	}
@@ -320,7 +326,9 @@ func Probe(ctx context.Context, opts ProbeOptions) error {
 		fmt.Fprintln(opts.Stdout)
 	}
 
-	_ = closeSession(ctx, conn, initResp, session.ID)
+	if opts.Close {
+		_ = closeSession(ctx, conn, initResp, session.ID)
+	}
 	stop()
 	return nil
 }
@@ -332,9 +340,15 @@ type sessionState struct {
 	Modes         *acp.SessionModeState
 }
 
-func openSession(ctx context.Context, conn *acp.ClientSideConnection, init acp.InitializeResponse, cwd, sessionID string, mcpServers []acp.McpServer) (sessionState, error) {
-	if mcpServers == nil {
+func openSession(ctx context.Context, conn *acp.ClientSideConnection, init acp.InitializeResponse, agent, cwd, sessionID string, mcpServers []acp.McpServer) (sessionState, error) {
+	adapter, _ := ResolveAdapter(agent)
+	if mcpServers == nil || adapter.NoSessionMCP {
 		mcpServers = []acp.McpServer{} // the field is required; null is rejected
+	}
+	var meta map[string]any
+	if adapter.SessionKeyPrefix != "" && sessionID != "" {
+		// requireExisting makes the adapter resolve the key to its canonical form.
+		meta = map[string]any{"sessionKey": adapter.SessionKeyPrefix + sessionID, "requireExisting": true}
 	}
 	if sessionID != "" {
 		switch {
@@ -343,6 +357,7 @@ func openSession(ctx context.Context, conn *acp.ClientSideConnection, init acp.I
 				SessionId:  acp.SessionId(sessionID),
 				Cwd:        cwd,
 				McpServers: mcpServers,
+				Meta:       meta,
 			})
 			if err != nil {
 				return sessionState{}, err
@@ -362,6 +377,7 @@ func openSession(ctx context.Context, conn *acp.ClientSideConnection, init acp.I
 				SessionId:  acp.SessionId(sessionID),
 				Cwd:        cwd,
 				McpServers: mcpServers,
+				Meta:       meta,
 			})
 			if err != nil {
 				return sessionState{}, err
@@ -612,7 +628,14 @@ func dumpAgentStderr(opts ProbeOptions, buf *bytes.Buffer) {
 func formatACPError(stage string, err error) error {
 	var requestErr *acp.RequestError
 	if errors.As(err, &requestErr) {
-		return fmt.Errorf("%s: ACP error %d: %s", stage, requestErr.Code, requestErr.Message)
+		message := fmt.Sprintf("%s: ACP error %d: %s", stage, requestErr.Code, requestErr.Message)
+		// Adapters put the actual cause in data; "Internal error" alone is useless.
+		if requestErr.Data != nil {
+			if data, jsonErr := json.Marshal(requestErr.Data); jsonErr == nil && string(data) != "null" {
+				message += " (" + truncate(string(data), 500) + ")"
+			}
+		}
+		return errors.New(message)
 	}
 	return fmt.Errorf("%s: %w", stage, err)
 }

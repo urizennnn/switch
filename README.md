@@ -20,7 +20,8 @@ The design is vendor-agnostic and built on the [Agent Client Protocol](https://a
 | Merge queue | Serialized merges into the integration branch, then integration verification |
 | Control plane | Per-run Unix socket, agent CLI, and MCP bridge offered to every agent |
 | Reliability | Crash recovery, orphan adapter cleanup, audit log, token usage, budgets |
-| Headless | `switch __control run|tasks|approve|reject|retry|diff|log` |
+| Headless | `switch __control run|status|stop|tasks|approve|reject|retry|diff|log` |
+| Detached runs | `/run --detach` or `__control run --detach`; survives the TUI; one process per run (lock) |
 | Packaging | GoReleaser config and GitHub Actions CI/release workflows |
 
 See [`docs/architecture.md`](docs/architecture.md) for the full architecture, language choice, phases, and risks.
@@ -53,6 +54,7 @@ go build -o switch .
 | `/plan <goal>` | Ask the lead to plan and create a run |
 | `/plan --file <path>` | Import a plan JSON file |
 | `/run` | Start or resume the run; workers stream into the run log |
+| `/run --detach [--allow]` | Run in a background process that outlives the TUI; worker permissions are deny (or allow) |
 | `/stop` | Stop the run; running tasks become `interrupted` and `/run` resumes them |
 | `/tasks` | Task list: enter for details, `a` approve, `r` reject, `d` diff, `t` retry |
 | `/review` | The task list, opened at the first task waiting for approval |
@@ -117,6 +119,9 @@ the TUI:
 ```bash
 ./switch __control plan --file plan.json
 ./switch __control run --permission allow   # until tasks wait for review
+./switch __control run --detach --permission allow   # in the background
+./switch __control status                   # who drives the run, task counts
+./switch __control stop                     # stop a background run
 ./switch __control tasks
 ./switch __control diff <task>
 ./switch __control approve <task>           # or: reject <task> <reason>, retry <task>
@@ -184,8 +189,8 @@ Switch runs a modular Go monolith. The engine owns runs, tasks, agents, rules, w
 3. **Phase 2 — Lead + workers** *(done)*: plan schema, control socket/CLI/MCP bridge, scheduler, worktrees, agent view.
 4. **Phase 3 — Review + integration** *(done)*: verification, diff review, merge queue, retries, budgets.
 5. **Phase 4 — Rules + context** *(done)*: global/project/local/role/task rules.
-6. **Phase 5 — OpenClaw + ecosystem** *(partial)*: adapter install/doctor done; OpenClaw is defined but unverified.
-7. **Phase 6 — Reliability + distribution** *(done for v1)*: crash recovery, orphan cleanup, headless run, packaging. Daemon/detach mode is not planned for v1.
+6. **Phase 5 — OpenClaw + ecosystem** *(done)*: `/adapters` install/uninstall verified with real npm installs; OpenClaw's ACP bridge verified (initialize, sessions, prompt round trip, resume) with adapter quirks handled.
+7. **Phase 6 — Reliability + distribution** *(done)*: crash recovery, orphan cleanup, run lock, detached runs, headless run, packaging.
 
 ## Development
 
@@ -214,10 +219,9 @@ The `tui/` package is wired to the chat engine. `switch` opens the TUI; the hidd
 ## Known limitations
 
 - One TUI chat with the lead per project; it spans lead switches, which are marked in the history.
-- One Switch process should drive a run at a time; nothing enforces it yet.
-- Headless `run` cannot ask for permissions: pass `--permission allow` or `deny`.
+- Headless and detached runs cannot ask for permissions: choose allow or deny up front.
+- OpenClaw needs a running gateway and a model provider configured in OpenClaw itself; its bridge rejects per-session MCP servers, so OpenClaw workers report through `$SWITCH_BIN __control agent` only.
 - Lead review needs a lead in the run; without one, review is left to you.
-- OpenClaw is untested because it is not installed on this machine.
 - OpenCode's default model may hit provider privacy settings; use `--model` to choose a permitted model.
 - Claude adapter hooks/plugins can add stderr noise; use `--agent-logs` only when debugging.
 - The ACP SDK is v0.x; it is pinned and wrapped behind the driver boundary.

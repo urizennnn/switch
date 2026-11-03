@@ -383,6 +383,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendJobText(msg.agent, msg.text)
 		return m, m.waitJob()
 
+	case dashboardTickMsg:
+		if m.job == "" {
+			m.refreshDashboard()
+		}
+		return m, dashboardTick()
+
+	case detachMsg:
+		m.refreshDashboard()
+		m.setModal(msg.title, msg.body)
+		return m, nil
+
 	case jobChangedMsg:
 		m.refreshDashboard()
 		return m, m.waitJob()
@@ -751,6 +762,17 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 			m.setModal("run", "no run yet\n\n/plan <goal> or /plan --file <path> first")
 			break
 		}
+		if m.runOwner > 0 {
+			m.setModal("run in progress", fmt.Sprintf("pid %d is driving this run in the background\n\n/tasks and /review approve its work · /stop stops it", m.runOwner))
+			break
+		}
+		if len(fields) > 1 && fields[1] == "--detach" {
+			permission := "deny"
+			if len(fields) > 2 && fields[2] == "--allow" {
+				permission = "allow"
+			}
+			return m, detachCmd(m.project, m.run.ID, permission)
+		}
 		ctx := m.startJob("run", "running", false)
 		engine, server, err := m.startRun(ctx)
 		if err != nil {
@@ -763,12 +785,15 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(runEngineCmd(ctx, engine, server, m.jobStream), m.waitJob())
 
 	case "/stop":
-		if m.job != "run" {
+		switch {
+		case m.job == "run":
+			m.jobCancel()
+			m.state = "cancelling"
+		case m.runOwner > 0 && m.run != nil:
+			return m, stopDetachedCmd(m.run.ID)
+		default:
 			m.setModal("stop", "no run in progress")
-			break
 		}
-		m.jobCancel()
-		m.state = "cancelling"
 
 	case "/tasks", "/review":
 		m.taskPicker = &taskPicker{}

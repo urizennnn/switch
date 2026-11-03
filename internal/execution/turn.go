@@ -16,6 +16,7 @@ func (e *Engine) acpTurn(ctx context.Context, req TurnRequest) (TurnResult, erro
 		Model:     req.Agent.Model,
 		SessionID: req.SessionID,
 		AgentLogs: e.opts.AgentLogs,
+		Ephemeral: req.Ephemeral,
 	}
 	if e.opts.Control != nil {
 		grant, err := e.opts.Control.Grant(req.Agent, req.TaskID)

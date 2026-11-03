@@ -117,6 +117,9 @@ func Execute(ctx context.Context, opts Options) (*Result, error) {
 			return nil, fmt.Errorf("parse lead output: %w", err)
 		}
 	}
+	if err := checkWorkers(planned, fleet, lead.Name); err != nil {
+		return nil, err
+	}
 
 	state, err := store.Open(config.StatePath())
 	if err != nil {
@@ -269,10 +272,28 @@ func runLead(ctx context.Context, lead config.Agent, project, prompt string, mod
 		Cwd:       project,
 		Model:     lead.Model,
 		AgentLogs: logs,
+		Ephemeral: true, // a plan is one turn; nothing resumes it
 	})
 	if err != nil {
 		return "", err
 	}
 	defer session.Close(context.Background())
 	return session.RunTurn(ctx, prompt, acpdriver.TurnOptions{Permission: mode, OnText: onText})
+}
+
+// checkWorkers rejects a plan with a role no worker can take. The lead never
+// takes tasks, so a role covered only by the lead would block the run.
+func checkWorkers(planned plan.Plan, fleet []config.Agent, leadName string) error {
+	roles := map[string]bool{}
+	for _, agent := range fleet {
+		if agent.Name != leadName && agent.Role != "lead" {
+			roles[agent.Role] = true
+		}
+	}
+	for _, task := range planned.Tasks {
+		if !roles[task.Role] {
+			return fmt.Errorf("task %s needs a %q worker, but no configured agent other than the lead (%s) has that role; add one to .switch/config.toml or pick another lead", task.ID, task.Role, leadName)
+		}
+	}
+	return nil
 }

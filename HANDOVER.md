@@ -398,7 +398,7 @@ Tasks:
 
 ### Milestone H — Reliability, headless operation, and distribution
 
-**Status:** DONE for v1: crash recovery, orphan adapter cleanup (`<state>/pids`), audit log (`events`, `/log`), token usage (`usage`, `/agents`), `max_turns`/`max_tokens` budgets, headless `__control run|tasks|approve|reject|retry|diff|log`, GoReleaser config, CI and release workflows. Not done: daemon/detach mode (not planned for v1), OpenClaw verification (not installed), cost budgets (adapters report cumulative cost only).
+**Status:** DONE: crash recovery, orphan adapter cleanup (`<state>/pids`), audit log (`events`, `/log`), token usage (`usage`, `/agents`), `max_turns`/`max_tokens` budgets, headless `__control run|tasks|approve|reject|retry|diff|log`, GoReleaser config, CI and release workflows. Also done afterwards: run lock (one driver per run), detached runs (`--detach`, `status`, `stop`, TUI `/run --detach` and `/stop`), polling for cross-process approvals. Not done: cost budgets (adapters report cumulative cost only).
 
 **Goal:** make Switch usable beyond a single interactive session.
 
@@ -502,7 +502,7 @@ sqlite3 ~/.local/state/switch/switch.db \
 - [x] `go build ./...`, `go test -race ./...`, `go vet ./...` pass.
 - [x] TUI smoke test passes in a real terminal (tmux, OpenCode).
 - [x] Lead persistence verified across restart.
-- [ ] Adapter install/uninstall flow verified end to end (confirmation verified; no install was run).
+- [x] Adapter install/uninstall flow verified end to end (Codex and OpenClaw installed into a scratch npm prefix through `/adapters`).
 - [x] Architecture docs reconciled with implementation.
 - [x] Worktree ownership decision recorded.
 - [x] No auto-push or auto-merge behavior: merges need `/approve`; nothing pushes.
@@ -516,7 +516,7 @@ sqlite3 ~/.local/state/switch/switch.db \
 3. **Conversation model:** decided, one shared project transcript with lead switches marked (5.3).
 4. **Run start:** explicit `/run`.
 5. **Control plane timing:** done after verification/review.
-6. **OpenClaw:** defined, unverified; verify when it can be installed.
+6. **OpenClaw:** verified up to the model call (see architecture, Verified adapters).
 7. **Legacy packages:** deleted.
 8. **`.switch/` in this repo:** commit, ignore, or keep local?
 9. **Merging the integration branch into the user's branch:** today the user merges it by hand. A `/merge-run` command with explicit confirmation is a possible follow-up.
@@ -525,11 +525,9 @@ sqlite3 ~/.local/state/switch/switch.db \
 
 ## 11. What is left
 
-- Daemon/detach mode, if still wanted.
-- Run ownership (a lock) so two Switch processes cannot drive one run.
 - An effective-rules view per role/task (`/rules <role>`).
 - Answering worker permission requests over the control socket for headless runs (headless is allow/deny only).
 - Adapter prewarming for cold-start latency.
-- OpenClaw verification; a real npm install/uninstall through `/adapters`.
+- An OpenClaw model reply: its ACP bridge is verified through Switch, but a prompt needs a model provider configured in OpenClaw (an API key or local model), which is the user's to set up.
 - Merging or pushing the completed integration branch is deliberately manual.
 

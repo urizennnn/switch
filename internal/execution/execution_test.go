@@ -408,3 +408,49 @@ func writeFile(t *testing.T, dir, name, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestRunLockAndCrossProcessApproval(t *testing.T) {
+	f := newFixture(t, []store.RunAgent{lead, builder1}, builderTask("a"), builderTask("b", "a"))
+	stateDir := filepath.Dir(filepath.Dir(f.run.IntegrationPath))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// The driving engine waits for approvals and polls the store for them.
+	driver := f.engine(config.RunConfig{})
+	driver.opts.WaitForReview, driver.opts.Poll = true, 50*time.Millisecond
+	result := make(chan error, 1)
+	go func() { _, err := driver.Run(ctx); result <- err }()
+
+	waitFor := func(id, status string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for f.task(id).Status != status {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s never reached %s (is %s)", id, status, f.task(id).Status)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	waitFor("run:a", StatusReview)
+
+	if pid, ok := RunOwner(stateDir, "run"); !ok || pid != os.Getpid() {
+		t.Fatalf("RunOwner = %d, %v", pid, ok)
+	}
+	if _, err := f.engine(config.RunConfig{}).Run(ctx); !errors.Is(err, ErrRunBusy) {
+		t.Fatalf("second driver err = %v, want ErrRunBusy", err)
+	}
+
+	// Another process approves; the driver notices on its next poll.
+	if err := f.engine(config.RunConfig{}).Approve(ctx, "run:a"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor("run:b", StatusReview)
+
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("driver err = %v", err)
+	}
+	if _, ok := RunOwner(stateDir, "run"); ok {
+		t.Fatal("lock still held after the driver stopped")
+	}
+}

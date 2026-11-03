@@ -13,6 +13,12 @@ type Adapter struct {
 	Command     []string
 	InstallHint string
 	AuthHint    string
+	// NoSessionMCP: the adapter rejects per-session MCP servers, so agents
+	// reach the control plane through the shell CLI only.
+	NoSessionMCP bool
+	// SessionKeyPrefix is sent as _meta.sessionKey when resuming, for adapters
+	// that cannot map a session ID back to their own key after a restart.
+	SessionKeyPrefix string
 }
 
 // AdapterStatus is the result of probing the local installation.
@@ -69,6 +75,11 @@ func ResolveAdapter(name string) (Adapter, error) {
 			Command:     []string{openclawBinary, "acp"},
 			InstallHint: "install OpenClaw and start its gateway with `openclaw gateway start`",
 			AuthHint:    "ensure the OpenClaw gateway is running and authenticated",
+			// The ACP bridge refuses session MCP servers and, after a bridge
+			// restart, resumes by bare session ID instead of the acp-bridge:<id>
+			// key it created the session under.
+			NoSessionMCP:     true,
+			SessionKeyPrefix: "acp-bridge:",
 		}, nil
 
 	default:

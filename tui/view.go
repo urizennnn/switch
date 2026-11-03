@@ -193,6 +193,8 @@ func (m model) sidebarContent(width int) string {
 		}
 		hint := "/run to start"
 		switch {
+		case m.runOwner > 0:
+			hint = fmt.Sprintf("detached · pid %d · /stop", m.runOwner)
 		case m.job == "run":
 			hint = "/tasks · /stop"
 		case review > 0:

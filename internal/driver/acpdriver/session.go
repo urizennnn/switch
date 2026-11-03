@@ -28,6 +28,9 @@ type Spec struct {
 	// MCPServers are offered to the agent for this session (stdio is the
 	// transport every agent must support).
 	MCPServers []acp.McpServer
+	// Ephemeral sessions are closed on the agent when the Session closes.
+	// Others stay resumable: some adapters delete a session on close.
+	Ephemeral bool
 	// AgentLogs, when non-nil, receives adapter stderr. Otherwise stderr is
 	// buffered for diagnostics.
 	AgentLogs io.Writer
@@ -140,6 +143,7 @@ type Session struct {
 	stderr      bytes.Buffer
 	done        chan struct{}
 	closeOnce   sync.Once
+	ephemeral   bool
 	exitMu      sync.Mutex
 	exitErr     error
 }
@@ -180,6 +184,7 @@ func Open(ctx context.Context, spec Spec) (*Session, error) {
 		permissions: make(chan *PermissionRequest, 32),
 		done:        make(chan struct{}),
 		cancel:      cancel,
+		ephemeral:   spec.Ephemeral,
 	}
 	session.Events = session.events
 
@@ -253,7 +258,7 @@ func Open(ctx context.Context, spec Spec) (*Session, error) {
 	}
 	session.init = initResp
 
-	state, err := openSession(ctx, conn, initResp, cwd, spec.SessionID, spec.MCPServers)
+	state, err := openSession(ctx, conn, initResp, spec.Agent, cwd, spec.SessionID, spec.MCPServers)
 	if err != nil {
 		session.Close(context.Background())
 		return nil, session.wrapError("session", err)
@@ -312,7 +317,9 @@ func (s *Session) Close(ctx context.Context) error {
 	var err error
 	s.closeOnce.Do(func() {
 		closeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		_ = closeSession(closeCtx, s.conn, s.init, acp.SessionId(s.ID))
+		if s.ephemeral {
+			_ = closeSession(closeCtx, s.conn, s.init, acp.SessionId(s.ID))
+		}
 		cancel()
 
 		if s.stdin != nil {

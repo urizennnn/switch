@@ -581,7 +581,7 @@ Superseded by section 18.
 
 ## 18. Execution engine (2026-11-03)
 
-Phases 2–4 and the v1 part of Phase 6 are implemented. Packages:
+Phases 2–6 are implemented. Packages:
 
 | Package | Responsibility |
 |---|---|
@@ -668,10 +668,52 @@ cumulative). `tasks` gained `session_id`, `commit_sha`, `feedback`, `review`,
 `last_error`, `summary`; `runs` gained `integration_path`. Columns are added
 in place for databases created by older builds.
 
+### Run ownership and detached runs
+
+- The process driving a run holds an exclusive `flock` on
+  `<state>/runs/<id8>/owner.lock`, which records its PID. The kernel drops the
+  lock when that process dies, so a crash never leaves it stale. A second
+  driver (TUI, headless, or detached) is refused with the owner's PID, and the
+  control server refuses to replace a socket that still accepts connections.
+- `__control run --detach` (TUI: `/run --detach [--allow]`) starts
+  `__control run --wait` in its own session, logging to
+  `<state>/runs/<id8>/run.log`, and returns once the child holds the lock.
+- `--wait` keeps the engine alive while tasks wait for review and polls the
+  store every 2s, so approvals made by another process (the TUI or
+  `__control approve`) wake it. The run exits on completed, blocked, or budget.
+- `__control status` shows the owner; `__control stop` (TUI: `/stop`) sends
+  SIGINT and waits for the lock to be released; running tasks become
+  `interrupted`.
+- The TUI refreshes the dashboard every 2s, so it shows a detached run's
+  progress and approves its tasks.
+
+### Session lifetime
+
+Only ephemeral sessions (planning, lead reviews) are closed with
+`session/close`. Chat and worker sessions are left open on the agent so they
+can be resumed: some adapters delete a session on close. The probe keeps
+sessions unless `--close` is passed. ACP errors now include the adapter's
+`data` field, which carries the real cause.
+
+### Adapter quirks
+
+`Adapter.NoSessionMCP` drops per-session MCP servers for adapters that reject
+them, and `Adapter.SessionKeyPrefix` sends `_meta.sessionKey` (with
+`requireExisting`) when resuming. Both are set for OpenClaw, whose ACP bridge
+refuses session MCP servers and, after a bridge restart, looks sessions up by
+bare ID instead of the `acp-bridge:<id>` key it created them under.
+
+### Verified adapters
+
+| Adapter | Verified |
+|---|---|
+| OpenCode | Full runs: workers, lead review, MCP control plane, resume |
+| Codex | Probe, resume (Phase 0); `/adapters` install → detected → ACP connect → uninstall |
+| Claude | Probe, permissions, resume (Phase 0) |
+| OpenClaw 2026.10.10 | `/adapters` install; gateway (loopback, dev); initialize, sessions, prompt round trip, resume after bridge restart. A model reply needs a provider configured in OpenClaw. |
+
 ### Not in v1
 
-- Daemon/detach mode; the TUI or a headless `run` must stay open while a run
-  executes.
-- Several Switch processes driving one run.
-- OpenClaw verification (not installed on the development machine).
+- Several Switch processes cooperating on one run (one drives; others may
+  approve, reject, and retry).
 - Adapter prewarming to hide cold-start latency.
