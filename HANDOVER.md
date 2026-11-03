@@ -502,7 +502,7 @@ sqlite3 ~/.local/state/switch/switch.db \
 - [x] `go build ./...`, `go test -race ./...`, `go vet ./...` pass.
 - [x] TUI smoke test passes in a real terminal (tmux, OpenCode).
 - [x] Lead persistence verified across restart.
-- [x] Adapter install/uninstall flow verified end to end (Codex and OpenClaw installed into a scratch npm prefix through `/adapters`).
+- [x] Adapter install/uninstall flow verified end to end (Codex and OpenClaw into a scratch npm prefix, then Codex globally; the global Codex adapter was kept).
 - [x] Architecture docs reconciled with implementation.
 - [x] Worktree ownership decision recorded.
 - [x] No auto-push or auto-merge behavior: merges need `/approve`; nothing pushes.
@@ -528,6 +528,6 @@ sqlite3 ~/.local/state/switch/switch.db \
 - An effective-rules view per role/task (`/rules <role>`).
 - Answering worker permission requests over the control socket for headless runs (headless is allow/deny only).
 - Adapter prewarming for cold-start latency.
-- OpenClaw against a real model provider: it is verified end to end as a worker with a scripted local model; a hosted provider needs the user's own key in OpenClaw.
+- OpenClaw against a hosted model provider (optional): verified end to end, headless and in the TUI, with a scripted local model, which the user accepted. To check a real provider, run `openclaw onboard`, start `openclaw gateway`, and run a plan with an `openclaw` worker.
 - Merging or pushing the completed integration branch is deliberately manual.
 
