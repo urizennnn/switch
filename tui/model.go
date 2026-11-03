@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -46,14 +45,13 @@ type model struct {
 	width    int
 	height   int
 
-	transcript    string
-	assistant     strings.Builder
-	assistantOpen bool
-	busy          bool
-	state         string
-	gen           int
-	permission    *acpdriver.PermissionRequest
-	err           error
+	entries    []entry
+	queued     string // sent once the lead connects
+	busy       bool
+	state      string
+	gen        int
+	permission *acpdriver.PermissionRequest
+	err        error
 
 	connecting       bool
 	connectErr       error
@@ -113,6 +111,7 @@ func New(opts Options) model {
 		height:     24,
 		state:      "connecting",
 		connecting: true,
+		home:       true, // usable at once; the lead connects in the background
 	}
 	m.layout()
 	return m
@@ -131,94 +130,29 @@ func dashboardTick() tea.Cmd {
 	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return dashboardTickMsg{} })
 }
 
-func (m model) initialTranscript() string {
-	var b strings.Builder
-	if m.chat == nil {
-		return ""
-	}
-
+// loadHistory fills the transcript from the project's saved conversation.
+// Session plumbing (resume failures, adapter logs) stays out of it; /session
+// shows that.
+func (m *model) loadHistory() {
+	m.entries = nil
 	if len(m.created) > 0 {
-		b.WriteString(systemStyle.Render("initialized .switch/ config and rules"))
-		b.WriteString("\n\n")
+		m.appendSystem("initialized .switch/ config and rules")
 	}
-
-	if m.status.ResumeError != nil {
-		b.WriteString(systemStyle.Render(fmt.Sprintf("resume failed; started a new session (%v)", m.status.ResumeError)))
-		b.WriteString("\n\n")
-	}
-
-	messages, err := m.store.Messages(m.ctx, m.chat.Project, 20)
-	if err == nil {
-		for _, message := range messages {
-			switch message.Role {
-			case "user":
-				b.WriteString(userMarkerStyle.Render("you"))
-				b.WriteString("  ")
-				b.WriteString(textStyle.Render(message.Content))
-				b.WriteString("\n\n")
-			case "assistant":
-				b.WriteString(switchMarkerStyle.Render("switch"))
-				b.WriteString("  ")
-				b.WriteString(textStyle.Render(message.Content))
-				b.WriteString("\n\n")
-			case "system":
-				b.WriteString(systemStyle.Render(message.Content))
-				b.WriteString("\n\n")
-			}
-		}
-	}
-
-	if b.Len() == 0 {
-		b.WriteString(systemStyle.Render("New session. Type /help for commands or a message below."))
-		b.WriteString("\n")
-	}
-	return b.String()
-}
-
-func (m *model) appendUser(text string) {
-	if m.assistantOpen {
-		m.transcript += "\n\n"
-		m.assistantOpen = false
-	}
-	m.transcript += userMarkerStyle.Render("you") + "  " + textStyle.Render(text) + "\n\n"
-}
-
-func (m *model) appendAssistantChunk(text string) {
-	if text == "" {
+	messages, err := m.store.Messages(m.ctx, m.project, 20)
+	if err != nil {
 		return
 	}
-	if !m.assistantOpen {
-		if m.transcript != "" && !strings.HasSuffix(m.transcript, "\n\n") {
-			m.transcript += "\n\n"
+	for _, message := range messages {
+		switch message.Role {
+		case "user":
+			m.appendUser(message.Content)
+		case "assistant":
+			m.appendAssistantChunk(message.Content)
+			m.closeAssistant()
+		case "system":
+			m.appendSystem(message.Content)
 		}
-		m.transcript += switchMarkerStyle.Render("switch") + "  "
-		m.assistantOpen = true
 	}
-	m.transcript += textStyle.Render(text)
-	m.assistant.WriteString(text)
-}
-
-func (m *model) closeAssistant() {
-	if m.assistantOpen {
-		m.transcript += "\n\n"
-		m.assistantOpen = false
-	}
-}
-
-func (m *model) appendSystem(text string) {
-	m.closeAssistant()
-	m.transcript += systemStyle.Render(text) + "\n\n"
-}
-
-func (m *model) appendError(text string) {
-	m.closeAssistant()
-	m.transcript += errorStyle.Render(text) + "\n\n"
-}
-
-func (m *model) refreshViewport() {
-	content := strings.TrimRight(m.transcript, "\n")
-	m.viewport.SetContent(content)
-	m.viewport.GotoBottom()
 }
 
 func (m model) ruleSummary() string {
@@ -266,6 +200,19 @@ func (m model) dashboardFleet() []config.Agent {
 		return m.fleet
 	}
 	return []config.Agent{m.lead}
+}
+
+// roleLabel is the role shown for an agent: whichever agent leads is "lead",
+// and an agent configured as lead that is not leading now is "standby".
+func (m model) roleLabel(agent config.Agent) string {
+	switch {
+	case agent.Name == m.lead.Name:
+		return "lead"
+	case agent.Role == "lead":
+		return "standby"
+	default:
+		return agent.Role
+	}
 }
 
 // fleetAgent finds a configured agent by name. Bare adapter names are not

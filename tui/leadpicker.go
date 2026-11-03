@@ -27,7 +27,7 @@ func buildLeadPicker(m model) *leadPicker {
 		available := adapterAvailable(agent.Driver)
 		choices = append(choices, leadChoice{
 			Label:     agent.Name,
-			Detail:    fmt.Sprintf("%s · %s", agent.Role, agent.Driver),
+			Detail:    fmt.Sprintf("%s · %s", m.roleLabel(agent), agent.Driver),
 			Section:   "Configured agents",
 			Agent:     agent,
 			Available: available,

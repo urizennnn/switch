@@ -106,6 +106,11 @@ rules, configured agents, latest run, task counts, commands, and keys. Use
 restarts. Slash commands operate over the dashboard without clearing it;
 `/home` returns to it after chatting.
 
+The TUI opens on the dashboard immediately while the lead connects in the
+background; a message sent before it is ready is delivered once it connects.
+Lead replies render as markdown, tool calls show as one line each that
+updates in place, and the agent's plan shows as a checklist.
+
 Type `/` to open the command palette. It filters as you type, shows
 descriptions, and supports up/down, tab completion, and enter. Anything that
 does not start with `/` is sent to the agent.

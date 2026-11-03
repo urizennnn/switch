@@ -136,18 +136,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.shutdown()
 			return m, tea.Quit
 		}
-		if m.chat == nil {
-			if msg.String() == "enter" && m.connectErr != nil {
-				m.connectErr = nil
-				m.connecting = true
-				m.state = "connecting"
-				return m, m.connectCmd()
-			}
-			var cmd tea.Cmd
-			m.input, cmd = m.input.Update(msg)
-			return m, cmd
-		}
-
 		if m.adapterPicker != nil {
 			switch msg.String() {
 			case "esc":
@@ -281,7 +269,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			text := strings.TrimSpace(m.input.Value())
-			if text == "" || m.busy {
+			if text == "" {
+				if m.chat == nil && m.connectErr != nil {
+					cmd := m.reconnect()
+					return m, cmd
+				}
+				return m, nil
+			}
+			if m.busy {
 				return m, nil
 			}
 			if strings.HasPrefix(text, "/") {
@@ -291,7 +286,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.paletteOpen = false
 			m.home = false
 			m.appendUser(text)
-			m.assistant.Reset()
+			if m.chat == nil {
+				// Still connecting: keep the message and send it once the lead is up.
+				m.queued = strings.TrimSpace(m.queued + "\n\n" + text)
+				m.refreshViewport()
+				if m.connectErr != nil {
+					cmd := m.reconnect()
+					return m, cmd
+				}
+				return m, nil
+			}
 			m.busy = true
 			m.state = "working"
 			m.refreshViewport()
@@ -315,6 +319,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.connectErr = msg.err
 			m.state = "error"
+			if !m.home {
+				m.appendError("could not start " + m.lead.Name + ": " + firstLine(msg.err.Error()) + "\npress enter to retry")
+				m.refreshViewport()
+			}
 			return m, nil
 		}
 		m.chat = msg.chat
@@ -329,10 +337,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lead.Model = m.chat.Model
 		}
 		m.state = "ready"
-		m.home = true
-		m.transcript = m.initialTranscript()
-		m.refreshViewport()
+		m.loadHistory()
 		m.refreshDashboard()
+		if m.queued != "" {
+			text := m.queued
+			m.queued = ""
+			m.appendUser(text)
+			m.busy = true
+			m.state = "working"
+			m.refreshViewport()
+			return m, tea.Batch(waitForActivity(m.chat.Session, m.gen), sendPrompt(m.ctx, m.chat, text))
+		}
+		m.refreshViewport()
 		return m, waitForActivity(m.chat.Session, m.gen)
 
 	case agentEventMsg:
@@ -487,6 +503,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // beginLeadSwitch shows the new lead optimistically and starts its session in
 // the background; leadChangedMsg reverts on failure.
 func (m model) beginLeadSwitch(agent config.Agent) (tea.Model, tea.Cmd) {
+	if m.chat == nil {
+		m.setModal("lead", m.lead.Name+" is still connecting; switch once it is ready")
+		return m, nil
+	}
 	m.previousLead = m.lead
 	m.lead = agent
 	if err := m.persistLead(agent.Name); err != nil {
@@ -584,25 +604,26 @@ func (m model) handleAgentEvent(event acpdriver.Event) (tea.Model, tea.Cmd) {
 	case acpdriver.EventThought:
 		return m, waitForActivity(m.chat.Session, m.gen)
 
-	case acpdriver.EventToolCall:
+	case acpdriver.EventToolCall, acpdriver.EventToolEdit:
 		if event.Tool != nil {
-			m.appendSystem(fmt.Sprintf("[tool] %s (%s)", event.Tool.Title, event.Tool.Status))
-			m.refreshViewport()
-		}
-		return m, waitForActivity(m.chat.Session, m.gen)
-
-	case acpdriver.EventToolEdit:
-		if event.Tool != nil && event.Tool.Title != "" &&
-			(event.Tool.Status == "completed" || event.Tool.Status == "failed") {
-			m.appendSystem(fmt.Sprintf("[tool] %s: %s", event.Tool.Title, event.Tool.Status))
+			m.appendTool(event.Tool.ID, event.Tool.Title, event.Tool.Status)
 			m.refreshViewport()
 		}
 		return m, waitForActivity(m.chat.Session, m.gen)
 
 	case acpdriver.EventPlan:
+		items := make([]string, 0, len(event.Plan))
 		for _, entry := range event.Plan {
-			m.appendSystem(fmt.Sprintf("[plan] %s: %s", entry.Status, entry.Content))
+			mark := "·"
+			switch entry.Status {
+			case "completed":
+				mark = "✓"
+			case "in_progress":
+				mark = "›"
+			}
+			items = append(items, mark+" "+entry.Content)
 		}
+		m.setPlan(items)
 		m.refreshViewport()
 		return m, waitForActivity(m.chat.Session, m.gen)
 
@@ -613,9 +634,7 @@ func (m model) handleAgentEvent(event acpdriver.Event) (tea.Model, tea.Cmd) {
 		return m, waitForActivity(m.chat.Session, m.gen)
 
 	case acpdriver.EventTurn:
-		m.closeAssistant()
-		text := m.assistant.String()
-		m.assistant.Reset()
+		text := m.closeAssistant()
 		m.busy = false
 		m.state = "ready"
 		m.refreshViewport()
@@ -703,6 +722,11 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		}
 	}
 	switch command {
+	case "/session", "/new":
+		if m.chat == nil {
+			m.setModal(command[1:], m.lead.Name+" is still connecting; try again in a moment")
+			return m, nil
+		}
 	case "/plan", "/run", "/adapters":
 		// Never plan, start a second run, or install adapters mid-run.
 		if m.job == "run" {
@@ -734,7 +758,11 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		}
 
 	case "/session":
-		m.setModal("session", fmt.Sprintf("lead: %s\ndriver: %s\nmodel: %s\nsession: %s", m.lead.Name, m.chat.Agent, m.chat.Model, m.chat.Session.ID))
+		info := fmt.Sprintf("lead: %s\ndriver: %s\nmodel: %s\nsession: %s (%s)", m.lead.Name, m.chat.Agent, m.chat.Model, m.chat.Session.ID, sessionState(m.status.Resumed))
+		if m.status.ResumeError != nil {
+			info += "\n\nthe previous session could not be resumed:\n" + m.status.ResumeError.Error()
+		}
+		m.setModal("session", info)
 
 	case "/plan":
 		if len(fields) < 2 {
@@ -840,10 +868,10 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	case "/doctor":
 		m.busy = true
 		m.state = "checking"
-		return m, doctorCmd(m.chat.Project)
+		return m, doctorCmd(m.project)
 
 	case "/init":
-		created, err := config.EnsureProject(m.chat.Project)
+		created, err := config.EnsureProject(m.project)
 		if err != nil {
 			m.setModal("init failed", err.Error())
 		} else if len(created) == 0 {
@@ -912,4 +940,12 @@ func planSummary(result *planning.Result) string {
 	}
 	fmt.Fprintf(&b, "worktrees: %s", truncate(result.Root, 56))
 	return b.String()
+}
+
+// reconnect retries starting the lead after a failed connection.
+func (m *model) reconnect() tea.Cmd {
+	m.connectErr = nil
+	m.connecting = true
+	m.state = "connecting"
+	return m.connectCmd()
 }

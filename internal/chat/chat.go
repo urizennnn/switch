@@ -86,6 +86,7 @@ func Open(ctx context.Context, opts Options) (*Chat, Status, error) {
 		AgentLogs: opts.AgentLogs,
 	})
 	if err != nil && sessionID != "" {
+		// The adapter itself failed; try once more without resuming.
 		resumeErr = err
 		session, err = acpdriver.Open(ctx, acpdriver.Spec{
 			Agent:     agent,
@@ -95,7 +96,9 @@ func Open(ctx context.Context, opts Options) (*Chat, Status, error) {
 			AgentLogs: opts.AgentLogs,
 		})
 	} else if err == nil && sessionID != "" {
-		resumed = true
+		// A failed resume falls back to a new session in the same process.
+		resumeErr = session.ResumeError
+		resumed = resumeErr == nil
 	}
 	if err != nil {
 		return nil, Status{}, err

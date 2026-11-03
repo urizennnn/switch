@@ -79,3 +79,9 @@ func TestFindTaskByPlanID(t *testing.T) {
 		t.Fatal("found a missing task")
 	}
 }
+
+type errTest string
+
+func (e errTest) Error() string { return string(e) }
+
+func keyEnter() tea.KeyPressMsg { return tea.KeyPressMsg{Code: tea.KeyEnter} }

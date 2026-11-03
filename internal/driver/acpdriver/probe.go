@@ -260,6 +260,9 @@ func Probe(ctx context.Context, opts ProbeOptions) error {
 			state = "resumed"
 		}
 		fmt.Fprintf(opts.Stdout, "\nsession:   %s (%s)\n", session.ID, state)
+		if session.ResumeErr != nil {
+			fmt.Fprintf(opts.Stdout, "resume:    failed (%v)\n", session.ResumeErr)
+		}
 		if model := configValue(report.Config, "model"); model != "" {
 			fmt.Fprintf(opts.Stdout, "model:     %s\n", model)
 		}
@@ -336,6 +339,7 @@ func Probe(ctx context.Context, opts ProbeOptions) error {
 type sessionState struct {
 	ID            acp.SessionId
 	Resumed       bool
+	ResumeErr     error // set when resume failed and a new session was created
 	ConfigOptions []acp.SessionConfigOption
 	Modes         *acp.SessionModeState
 }
@@ -351,52 +355,67 @@ func openSession(ctx context.Context, conn *acp.ClientSideConnection, init acp.I
 		meta = map[string]any{"sessionKey": adapter.SessionKeyPrefix + sessionID, "requireExisting": true}
 	}
 	if sessionID != "" {
-		switch {
-		case init.AgentCapabilities.SessionCapabilities.Resume != nil:
-			resp, err := conn.ResumeSession(ctx, acp.ResumeSessionRequest{
-				SessionId:  acp.SessionId(sessionID),
-				Cwd:        cwd,
-				McpServers: mcpServers,
-				Meta:       meta,
-			})
-			if err != nil {
-				return sessionState{}, err
-			}
-			if err := resp.Validate(); err != nil {
-				return sessionState{}, err
-			}
-			return sessionState{
-				ID:            acp.SessionId(sessionID),
-				Resumed:       true,
-				ConfigOptions: resp.ConfigOptions,
-				Modes:         resp.Modes,
-			}, nil
-
-		case init.AgentCapabilities.LoadSession:
-			resp, err := conn.LoadSession(ctx, acp.LoadSessionRequest{
-				SessionId:  acp.SessionId(sessionID),
-				Cwd:        cwd,
-				McpServers: mcpServers,
-				Meta:       meta,
-			})
-			if err != nil {
-				return sessionState{}, err
-			}
-			if err := resp.Validate(); err != nil {
-				return sessionState{}, err
-			}
-			return sessionState{
-				ID:            acp.SessionId(sessionID),
-				Resumed:       true,
-				ConfigOptions: resp.ConfigOptions,
-				Modes:         resp.Modes,
-			}, nil
-
-		default:
-			return sessionState{}, fmt.Errorf("adapter does not advertise session resume/load support")
+		state, err := resumeSession(ctx, conn, init, cwd, sessionID, mcpServers, meta)
+		if err == nil {
+			return state, nil
 		}
+		// Fall back to a new session on the same connection: restarting the
+		// adapter would cost another cold start.
+		state, newErr := newSession(ctx, conn, cwd, mcpServers)
+		state.ResumeErr = err
+		return state, newErr
 	}
+	return newSession(ctx, conn, cwd, mcpServers)
+}
 
+func resumeSession(ctx context.Context, conn *acp.ClientSideConnection, init acp.InitializeResponse, cwd, sessionID string, mcpServers []acp.McpServer, meta map[string]any) (sessionState, error) {
+	switch {
+	case init.AgentCapabilities.SessionCapabilities.Resume != nil:
+		resp, err := conn.ResumeSession(ctx, acp.ResumeSessionRequest{
+			SessionId:  acp.SessionId(sessionID),
+			Cwd:        cwd,
+			McpServers: mcpServers,
+			Meta:       meta,
+		})
+		if err != nil {
+			return sessionState{}, err
+		}
+		if err := resp.Validate(); err != nil {
+			return sessionState{}, err
+		}
+		return sessionState{
+			ID:            acp.SessionId(sessionID),
+			Resumed:       true,
+			ConfigOptions: resp.ConfigOptions,
+			Modes:         resp.Modes,
+		}, nil
+
+	case init.AgentCapabilities.LoadSession:
+		resp, err := conn.LoadSession(ctx, acp.LoadSessionRequest{
+			SessionId:  acp.SessionId(sessionID),
+			Cwd:        cwd,
+			McpServers: mcpServers,
+			Meta:       meta,
+		})
+		if err != nil {
+			return sessionState{}, err
+		}
+		if err := resp.Validate(); err != nil {
+			return sessionState{}, err
+		}
+		return sessionState{
+			ID:            acp.SessionId(sessionID),
+			Resumed:       true,
+			ConfigOptions: resp.ConfigOptions,
+			Modes:         resp.Modes,
+		}, nil
+
+	default:
+		return sessionState{}, fmt.Errorf("adapter does not advertise session resume/load support")
+	}
+}
+
+func newSession(ctx context.Context, conn *acp.ClientSideConnection, cwd string, mcpServers []acp.McpServer) (sessionState, error) {
 	resp, err := conn.NewSession(ctx, acp.NewSessionRequest{
 		Cwd:        cwd,
 		McpServers: mcpServers,

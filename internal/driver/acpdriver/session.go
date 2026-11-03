@@ -131,6 +131,9 @@ type Session struct {
 	Model  string
 	Caps   CapabilitiesReport
 	Events <-chan Event
+	// ResumeError is set when the requested session could not be resumed and
+	// a new one was created instead.
+	ResumeError error
 
 	events      chan Event
 	permissions chan *PermissionRequest
@@ -264,6 +267,7 @@ func Open(ctx context.Context, spec Spec) (*Session, error) {
 		return nil, session.wrapError("session", err)
 	}
 	session.ID = string(state.ID)
+	session.ResumeError = state.ResumeErr
 	session.Caps = buildReport(spec.Agent, command, initResp)
 	session.Caps.SessionID = session.ID
 	session.Caps.Config = configOptions(state.ConfigOptions)

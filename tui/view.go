@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/store"
 )
 
@@ -153,7 +154,7 @@ func (m model) sidebarContent(width int) string {
 		name := fmt.Sprintf("%-10s", truncate(agent.Name, 10))
 		state := "idle"
 		if active {
-			state = "lead"
+			state = "active"
 		} else if task, ok := m.agentTask(agent.Name); ok {
 			state = truncate(shortTaskID(task.ID), 12)
 		}
@@ -163,7 +164,7 @@ func (m model) sidebarContent(width int) string {
 		}
 		b.WriteString(line)
 		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  " + truncate(agent.Role+" · "+agent.Driver, width-6)))
+		b.WriteString(dimStyle.Render("  " + truncate(m.roleLabel(agent)+" · "+agent.Driver, width-6)))
 		b.WriteString("\n")
 	}
 
@@ -214,8 +215,6 @@ func (m model) sidebarContent(width int) string {
 
 func (m model) mainTitle() string {
 	switch {
-	case m.chat == nil:
-		return "connecting"
 	case m.home:
 		return "overview"
 	default:
@@ -225,14 +224,10 @@ func (m model) mainTitle() string {
 
 func (m model) mainContent(width, height int) string {
 	switch {
-	case m.chat == nil:
-		if m.connectErr != nil {
-			return errorStyle.Render("could not start the lead") + "\n\n" +
-				textStyle.Render(m.connectErr.Error()) + "\n\n" +
-				dimStyle.Render("enter to retry · ctrl+c to quit")
-		}
-		return textStyle.Render("starting "+m.lead.Name+" ("+m.lead.Driver+")…") + "\n\n" +
-			dimStyle.Render("the TUI is ready; the agent is connecting in the background")
+	case m.chat == nil && m.connectErr != nil && m.home:
+		return errorStyle.Render("could not start "+m.lead.Name) + "\n\n" +
+			textStyle.Width(max(10, width-4)).Render(firstLine(m.connectErr.Error())) + "\n\n" +
+			dimStyle.Render("enter to retry · /doctor to check setup · ctrl+c to quit")
 	case m.home:
 		return m.overviewContent(width)
 	default:
@@ -254,13 +249,20 @@ func (m model) overviewContent(width int) string {
 	b.WriteString(section("lead"))
 	b.WriteString(keyValue("agent", m.lead.Name))
 	b.WriteString("\n")
+	if adapterSource(driver) == "npx" {
+		// npx resolves the package on every start, which is the slow part.
+		driver += dimStyle.Render("  via npx · /adapters installs it for faster starts")
+	}
 	b.WriteString(keyValue("driver", driver))
 	b.WriteString("\n")
 	b.WriteString(keyValue("model", model))
 	b.WriteString("\n")
-	sessionLabel := shortID(m.chat.Session.ID) + " (" + sessionState(m.status.Resumed) + ")"
-	if m.state == "starting lead" {
-		sessionLabel = "connecting…"
+	sessionLabel := "connecting…"
+	switch {
+	case m.chat == nil && m.connectErr != nil:
+		sessionLabel = "not connected"
+	case m.chat != nil && m.state != "starting lead":
+		sessionLabel = shortID(m.chat.Session.ID) + " (" + sessionState(m.status.Resumed) + ")"
 	}
 	b.WriteString(keyValue("session", sessionLabel))
 	b.WriteString("\n")
@@ -453,4 +455,17 @@ func (m model) jobLogTitle() string {
 		return "plan log · esc to cancel"
 	}
 	return "run log · /stop to end"
+}
+
+// adapterSource reports how an adapter is launched: installed, npx, or missing.
+func adapterSource(name string) string {
+	for _, status := range acpdriver.AdapterStatuses() {
+		if status.Name == name {
+			if !status.Available {
+				return "missing"
+			}
+			return status.Source
+		}
+	}
+	return ""
 }
