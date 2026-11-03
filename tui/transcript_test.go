@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/viewport"
+	"github.com/urizennnn/switch/internal/chat"
 	"github.com/urizennnn/switch/internal/config"
+	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/store"
 )
 
@@ -95,5 +97,31 @@ func TestLeadLabelOncePerTurn(t *testing.T) {
 	m.closeAssistant()
 	if n := strings.Count(m.renderTranscript(60), leadLabelStyle.Render("lead")+"\n"); n != 2 {
 		t.Fatalf("lead label shown %d times, want once per turn (2)", n)
+	}
+}
+
+func TestHistoryIsScopedToTheSession(t *testing.T) {
+	state, err := store.Open(filepath.Join(t.TempDir(), "switch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	ctx := context.Background()
+	project := t.TempDir()
+	_ = state.AppendMessage(ctx, project, "old-session", "user", "from the old session")
+	_ = state.AppendMessage(ctx, project, "new-session", "user", "from this session")
+
+	m := model{ctx: ctx, store: state, project: project}
+	m.chat = &chat.Chat{Project: project, Store: state, Session: &acpdriver.Session{ID: "new-session"}}
+	m.loadHistory()
+	out := m.renderTranscript(60)
+	if !strings.Contains(out, "from this session") || strings.Contains(out, "from the old session") {
+		t.Fatalf("history shows the wrong session:\n%s", out)
+	}
+
+	m.chat.Session = &acpdriver.Session{ID: "brand-new"}
+	m.loadHistory()
+	if len(m.entries) != 0 {
+		t.Fatalf("a new session shows %d old entries", len(m.entries))
 	}
 }

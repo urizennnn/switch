@@ -182,9 +182,9 @@ Choose one:
 
 The architecture currently says "one worktree per agent/task", so this needs to be settled before the scheduler.
 
-### 5.3 Chat history is not scoped by agent — DECIDED: one project conversation
+### 5.3 Chat history is not scoped by agent — DONE: one transcript per session
 
-The conversation spans leads; each lead switch is recorded as a system line in the history. Per-agent transcripts remain possible later.
+`chat_messages.session_id` scopes every message to its agent session. A resumed session shows its own conversation; `/new` and lead switches start with an empty transcript (a lead switch records one "is now the lead" line). Messages saved before the column existed have no session and are not shown.
 
 `chat_sessions` is keyed only by project, and `chat_messages` has no agent column. Switching leads overwrites the single session and the conversation view may show messages from a previous agent. Decide whether to:
 
@@ -513,7 +513,7 @@ sqlite3 ~/.local/state/switch/switch.db \
 
 1. **Worktree model:** decided, one per task (5.2).
 2. **Lead persistence scope:** per project (current) or global fallback?
-3. **Conversation model:** decided, one shared project transcript with lead switches marked (5.3).
+3. **Conversation model:** decided, one transcript per agent session (5.3).
 4. **Run start:** explicit `/run`.
 5. **Control plane timing:** done after verification/review.
 6. **OpenClaw:** verified, by the user's decision: as a worker end to end (scripted model, headless and TUI) and with real hosted-model replies through a loopback relay to OpenCode's model. Using an OpenClaw built-in provider is account setup (`openclaw onboard`), not Switch work.

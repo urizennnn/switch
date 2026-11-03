@@ -130,15 +130,19 @@ func dashboardTick() tea.Cmd {
 	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return dashboardTickMsg{} })
 }
 
-// loadHistory fills the transcript from the project's saved conversation.
-// Session plumbing (resume failures, adapter logs) stays out of it; /session
-// shows that.
+// loadHistory shows the current session's saved transcript: a resumed
+// session shows its conversation, a new one starts empty. Session plumbing
+// (resume failures, adapter logs) stays out of it; /session shows that.
 func (m *model) loadHistory() {
 	m.entries = nil
 	if len(m.created) > 0 {
 		m.appendSystem("initialized .switch/ config and rules")
+		m.created = nil
 	}
-	messages, err := m.store.Messages(m.ctx, m.project, 20)
+	if m.chat == nil {
+		return
+	}
+	messages, err := m.chat.History(m.ctx, 50)
 	if err != nil {
 		return
 	}

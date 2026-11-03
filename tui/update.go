@@ -458,6 +458,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.chat = msg.chat
 		m.status = msg.status
+		m.loadHistory() // a new session starts with an empty transcript
+		m.refreshViewport()
 		m.refreshDashboard()
 		m.setModal("new session", m.chat.Session.ID)
 		return m, waitForActivity(m.chat.Session, m.gen)
@@ -487,11 +489,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lead = msg.agent
 		m.status = msg.status
 		_ = m.persistLead(msg.agent.Name)
-		// One project conversation spans leads; mark where each one takes over.
+		// The new lead has its own session, so its transcript starts fresh.
 		note := fmt.Sprintf("%s (%s) is now the lead", msg.agent.Name, msg.agent.Driver)
-		m.appendSystem(note)
+		_ = m.chat.Note(m.ctx, note)
+		m.loadHistory()
 		m.refreshViewport()
-		_ = m.store.AppendMessage(m.ctx, m.chat.Project, "system", note)
 		m.refreshDashboard()
 		m.setModal("lead", fmt.Sprintf("%s is now the lead (%s)", msg.agent.Name, msg.agent.Driver))
 		return m, waitForActivity(m.chat.Session, m.gen)

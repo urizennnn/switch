@@ -80,6 +80,8 @@ var executionTables = []string{
 // executionColumns are added to tables created by older builds.
 var executionColumns = []struct{ table, column, def string }{
 	{"runs", "integration_path", "TEXT NOT NULL DEFAULT ''"},
+	// Messages saved before this column existed have no session and stay hidden.
+	{"chat_messages", "session_id", "TEXT NOT NULL DEFAULT ''"},
 	{"tasks", "session_id", "TEXT NOT NULL DEFAULT ''"},
 	{"tasks", "commit_sha", "TEXT NOT NULL DEFAULT ''"},
 	{"tasks", "feedback", "TEXT NOT NULL DEFAULT ''"},
@@ -106,7 +108,8 @@ func (s *Store) migrateExecution() error {
 			return fmt.Errorf("migrate %s.%s: %w", c.table, c.column, err)
 		}
 	}
-	return nil
+	_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, id);`)
+	return err
 }
 
 func (s *Store) GetTask(ctx context.Context, id string) (Task, bool, error) {

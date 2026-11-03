@@ -45,12 +45,15 @@ func TestMessagesChronological(t *testing.T) {
 
 	ctx := context.Background()
 	for _, message := range []string{"one", "two", "three"} {
-		if err := store.AppendMessage(ctx, "/tmp/project", "user", message); err != nil {
+		if err := store.AppendMessage(ctx, "/tmp/project", "ses-1", "user", message); err != nil {
 			t.Fatalf("AppendMessage: %v", err)
 		}
 	}
 
-	messages, err := store.Messages(ctx, "/tmp/project", 10)
+	if err := store.AppendMessage(ctx, "/tmp/project", "ses-2", "user", "other session"); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := store.Messages(ctx, "/tmp/project", "ses-1", 10)
 	if err != nil {
 		t.Fatalf("Messages: %v", err)
 	}

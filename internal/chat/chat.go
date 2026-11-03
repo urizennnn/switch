@@ -131,7 +131,7 @@ func Open(ctx context.Context, opts Options) (*Chat, Status, error) {
 // Send persists the user message, prepends the effective rules, and runs one
 // turn. Events stream on chat.Session.Events while it runs.
 func (c *Chat) Send(ctx context.Context, text string) (acp.PromptResponse, error) {
-	if err := c.Store.AppendMessage(ctx, c.Project, "user", text); err != nil {
+	if err := c.Store.AppendMessage(ctx, c.Project, c.Session.ID, "user", text); err != nil {
 		return acp.PromptResponse{}, err
 	}
 	return c.Session.Prompt(ctx, c.Rules.Prompt(text))
@@ -142,7 +142,18 @@ func (c *Chat) SaveAssistant(ctx context.Context, text string) error {
 	if text == "" {
 		return nil
 	}
-	return c.Store.AppendMessage(ctx, c.Project, "assistant", text)
+	return c.Store.AppendMessage(ctx, c.Project, c.Session.ID, "assistant", text)
+}
+
+// Note records a line in this session's transcript, such as a lead change.
+func (c *Chat) Note(ctx context.Context, text string) error {
+	return c.Store.AppendMessage(ctx, c.Project, c.Session.ID, "system", text)
+}
+
+// History returns this session's transcript, oldest first. A resumed session
+// shows its own conversation; a new one starts empty.
+func (c *Chat) History(ctx context.Context, limit int) ([]store.Message, error) {
+	return c.Store.Messages(ctx, c.Project, c.Session.ID, limit)
 }
 
 // SwitchAgent opens a fresh session for another agent and returns a new Chat

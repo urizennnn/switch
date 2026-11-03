@@ -214,24 +214,27 @@ func (s *Store) DeleteChatSession(ctx context.Context, project string) error {
 	return err
 }
 
-func (s *Store) AppendMessage(ctx context.Context, project, role, content string) error {
+// AppendMessage records a message in one agent session's transcript.
+func (s *Store) AppendMessage(ctx context.Context, project, sessionID, role, content string) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO chat_messages(project_path, role, content, created_at)
-		VALUES(?, ?, ?, ?)`,
-		project, role, content, time.Now().UTC().Format(time.RFC3339))
+		INSERT INTO chat_messages(project_path, session_id, role, content, created_at)
+		VALUES(?, ?, ?, ?, ?)`,
+		project, sessionID, role, content, time.Now().UTC().Format(time.RFC3339))
 	return err
 }
 
-func (s *Store) Messages(ctx context.Context, project string, limit int) ([]Message, error) {
+// Messages returns the latest messages of one session, oldest first. Each
+// session has its own transcript; a new session starts empty.
+func (s *Store) Messages(ctx context.Context, project, sessionID string, limit int) ([]Message, error) {
 	if limit <= 0 {
 		limit = 200
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT role, content, created_at
 		FROM chat_messages
-		WHERE project_path = ?
+		WHERE project_path = ? AND session_id = ?
 		ORDER BY id DESC
-		LIMIT ?`, project, limit)
+		LIMIT ?`, project, sessionID, limit)
 	if err != nil {
 		return nil, err
 	}
