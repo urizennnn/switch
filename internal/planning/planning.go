@@ -170,11 +170,15 @@ func Execute(ctx context.Context, opts Options) (*Result, error) {
 		if err != nil {
 			return nil, fmt.Errorf("create worktree for %s: %w", agent.Name, err)
 		}
+		role := agent.Role
+		if agent.Name == lead.Name {
+			role = "lead" // the run's lead plans and reviews; it never takes tasks
+		}
 		runAgent := store.RunAgent{
 			ID:        uuid.NewString(),
 			RunID:     runID,
 			Name:      agent.Name,
-			Role:      agent.Role,
+			Role:      role,
 			Driver:    agent.Driver,
 			Model:     agent.Model,
 			Worktree:  wt.Path,

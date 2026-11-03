@@ -82,10 +82,12 @@ func panel(width, height int, title, content string) string {
 	if strings.TrimSpace(title) != "" {
 		head = titleStyle.Render(strings.ToUpper(title)) + "\n"
 	}
+	// Height is only a minimum; clip to the rows inside the border so long
+	// content cannot push this panel taller than its neighbour.
 	return panelStyle.
 		Width(max(10, width)).
 		Height(max(3, height)).
-		Render(head + content)
+		Render(truncateLines(head+strings.TrimRight(content, "\n"), max(1, height-2)))
 }
 
 func appHeader(width int, left, right string) string {
@@ -160,10 +162,11 @@ func tailLines(value string, limit int) string {
 	return "…\n" + strings.Join(lines[len(lines)-limit+1:], "\n")
 }
 
+// truncateLines keeps at most limit lines, ending with an ellipsis when cut.
 func truncateLines(value string, limit int) string {
 	lines := strings.Split(value, "\n")
 	if len(lines) <= limit {
 		return value
 	}
-	return strings.Join(lines[:limit], "\n") + "\n" + dimStyle.Render("…")
+	return strings.Join(lines[:max(0, limit-1)], "\n") + "\n" + dimStyle.Render("…")
 }

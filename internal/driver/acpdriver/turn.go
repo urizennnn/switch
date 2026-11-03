@@ -45,7 +45,8 @@ func (s *Session) RunTurn(ctx context.Context, prompt string, opts TurnOptions) 
 					onText(fmt.Sprintf("\n[tool] %s (%s)\n", event.Tool.Title, event.Tool.Status))
 				}
 			case EventToolEdit:
-				if event.Tool != nil && (event.Tool.Status == "completed" || event.Tool.Status == "failed") {
+				if event.Tool != nil && event.Tool.Title != "" &&
+					(event.Tool.Status == "completed" || event.Tool.Status == "failed") {
 					onText(fmt.Sprintf("[tool] %s: %s\n", event.Tool.Title, event.Tool.Status))
 				}
 			case EventTurn:
