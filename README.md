@@ -189,7 +189,7 @@ Switch runs a modular Go monolith. The engine owns runs, tasks, agents, rules, w
 3. **Phase 2 — Lead + workers** *(done)*: plan schema, control socket/CLI/MCP bridge, scheduler, worktrees, agent view.
 4. **Phase 3 — Review + integration** *(done)*: verification, diff review, merge queue, retries, budgets.
 5. **Phase 4 — Rules + context** *(done)*: global/project/local/role/task rules.
-6. **Phase 5 — OpenClaw + ecosystem** *(done)*: `/adapters` install/uninstall verified with real npm installs; OpenClaw's ACP bridge verified (initialize, sessions, prompt round trip, resume) with adapter quirks handled.
+6. **Phase 5 — OpenClaw + ecosystem** *(done)*: `/adapters` install/uninstall verified with real npm installs; OpenClaw verified as a worker in a full run (bridge, gateway, model reply, tool call, verify, review, merge) with adapter quirks handled.
 7. **Phase 6 — Reliability + distribution** *(done)*: crash recovery, orphan cleanup, run lock, detached runs, headless run, packaging.
 
 ## Development

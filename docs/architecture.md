@@ -710,7 +710,7 @@ bare ID instead of the `acp-bridge:<id>` key it created them under.
 | OpenCode | Full runs: workers, lead review, MCP control plane, resume |
 | Codex | Probe, resume (Phase 0); `/adapters` install → detected → ACP connect → uninstall |
 | Claude | Probe, permissions, resume (Phase 0) |
-| OpenClaw 2026.10.10 | `/adapters` install; gateway (loopback, dev); initialize, sessions, prompt round trip, resume after bridge restart. A model reply needs a provider configured in OpenClaw. |
+| OpenClaw 2026.10.10 | `/adapters` install; gateway (loopback, dev); initialize, sessions, resume after bridge restart; a model reply; and a full run as a worker: the model called OpenClaw's `exec` tool, the file landed in the Switch task worktree, verification passed, the OpenCode lead approved, and the merge completed. The model was a scripted OpenAI-compatible stand-in on loopback (`models.providers` custom provider), since no provider key was available; any real OpenClaw provider uses the same path. |
 
 ### Not in v1
 

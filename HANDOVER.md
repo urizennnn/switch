@@ -516,7 +516,7 @@ sqlite3 ~/.local/state/switch/switch.db \
 3. **Conversation model:** decided, one shared project transcript with lead switches marked (5.3).
 4. **Run start:** explicit `/run`.
 5. **Control plane timing:** done after verification/review.
-6. **OpenClaw:** verified up to the model call (see architecture, Verified adapters).
+6. **OpenClaw:** verified as a worker end to end (see architecture, Verified adapters).
 7. **Legacy packages:** deleted.
 8. **`.switch/` in this repo:** commit, ignore, or keep local?
 9. **Merging the integration branch into the user's branch:** today the user merges it by hand. A `/merge-run` command with explicit confirmation is a possible follow-up.
@@ -528,6 +528,6 @@ sqlite3 ~/.local/state/switch/switch.db \
 - An effective-rules view per role/task (`/rules <role>`).
 - Answering worker permission requests over the control socket for headless runs (headless is allow/deny only).
 - Adapter prewarming for cold-start latency.
-- An OpenClaw model reply: its ACP bridge is verified through Switch, but a prompt needs a model provider configured in OpenClaw (an API key or local model), which is the user's to set up.
+- OpenClaw against a real model provider: it is verified end to end as a worker with a scripted local model; a hosted provider needs the user's own key in OpenClaw.
 - Merging or pushing the completed integration branch is deliberately manual.
 
