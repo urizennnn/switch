@@ -46,6 +46,23 @@ func TestToolOutputAppearsInTranscript(t *testing.T) {
 	}
 }
 
+func TestCommandOutputCollapsedAndExpandable(t *testing.T) {
+	var entries []entry
+	addTool(&entries, acpdriver.ToolInfo{ID: "cmd", Title: "Shell", Kind: "execute", Status: "completed", Output: "first line\nsecond line"})
+	got := ansi.Strip(renderEntries(entries, 60, "lead", 0, false, false))
+	if strings.Contains(got, "first line") || !strings.Contains(got, "2 lines") || !strings.Contains(got, "ctrl+e") {
+		t.Fatalf("command not collapsed: %s", got)
+	}
+	got = ansi.Strip(renderEntries(entries, 60, "lead", 0, false, true))
+	if !strings.Contains(got, "first line") || !strings.Contains(got, "second line") {
+		t.Fatalf("command not expanded: %s", got)
+	}
+	got = ansi.Strip(renderEntries(entries, 60, "lead", 0, false, false))
+	if strings.Contains(got, "first line") {
+		t.Fatalf("command did not collapse again: %s", got)
+	}
+}
+
 func TestRunningToolCachesOutputAndRefreshesOnChange(t *testing.T) {
 	var entries []entry
 	addTool(&entries, acpdriver.ToolInfo{ID: "t", Title: "Read", Status: "in_progress", Output: "first"})

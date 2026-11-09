@@ -355,6 +355,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Following a worker or subagent: tab moves between agents, esc goes
 		// back up, and a worker's subagent cards can be opened.
 		switch key := msg.String(); {
+		case key == "ctrl+e":
+			m.showCommands = !m.showCommands
+			m.refreshViewport()
+			return m, nil
 		case key == "ctrl+t":
 			m.showThoughts = !m.showThoughts
 			m.refreshViewport()

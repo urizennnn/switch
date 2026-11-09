@@ -10,6 +10,7 @@ import (
 	"charm.land/glamour/v2/ansi"
 	"charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
+	terminalansi "github.com/charmbracelet/x/ansi"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
 )
 
@@ -43,6 +44,7 @@ type entry struct {
 	name           string // its first title, such as "shell" or "Read"
 	detail         string // what it acts on, such as the command
 	status         string
+	toolKind       string
 	output         string
 	outputRendered string
 	outputWidth    int
@@ -116,6 +118,9 @@ func addTool(list *[]entry, tool acpdriver.ToolInfo) {
 		if tool.Status != "" {
 			e.status = tool.Status
 		}
+		if tool.Kind != "" {
+			e.toolKind = tool.Kind
+		}
 		if tool.Output != "" && tool.Output != e.output {
 			e.output = tool.Output
 			e.outputRendered = ""
@@ -136,7 +141,7 @@ func addTool(list *[]entry, tool acpdriver.ToolInfo) {
 		return
 	}
 	closeOpen(list)
-	*list = append(*list, entry{kind: entryTool, id: tool.ID, name: name, detail: tool.Detail, status: tool.Status, output: tool.Output})
+	*list = append(*list, entry{kind: entryTool, id: tool.ID, name: name, detail: tool.Detail, status: tool.Status, output: tool.Output, toolKind: tool.Kind})
 }
 
 func setPlanIn(list *[]entry, items []string) {
@@ -239,7 +244,7 @@ func (m *model) appendError(text string) { addNote(&m.entries, entryError, text)
 // user has scrolled up.
 func (m *model) refreshViewport() {
 	follow := m.viewport.AtBottom() || m.viewport.TotalLineCount() == 0
-	m.viewport.SetContent(m.renderTranscript(m.viewport.Width()))
+	m.viewport.SetContent(terminalansi.Hardwrap(m.renderTranscript(m.viewport.Width()), m.viewport.Width(), true))
 	if follow {
 		m.viewport.GotoBottom()
 	}
@@ -250,7 +255,7 @@ func (m *model) renderTranscript(width int) string {
 	if label == "" {
 		label = "lead"
 	}
-	out := renderEntries(m.entries, max(20, width), label, m.frame, m.showThoughts)
+	out := renderEntries(m.entries, max(20, width), label, m.frame, m.showThoughts, m.showCommands)
 	if m.busy && m.state == "working" {
 		out += "\n\n" + activityLine(activity(m.entries), m.turnStarted, m.frame, "esc to stop")
 	}
@@ -286,12 +291,13 @@ func elapsed(start time.Time) string {
 
 // renderEntries renders a transcript. Closed entries are cached; open ones
 // re-render only when their text grew.
-func renderEntries(entries []entry, width int, label string, frame int, showThoughts bool) string {
+func renderEntries(entries []entry, width int, label string, frame int, showThoughts bool, showCommands ...bool) string {
 	var b strings.Builder
+	commandsOpen := len(showCommands) > 0 && showCommands[0]
 	labelled := false // the agent label is shown once per turn
 	for i := range entries {
 		e := &entries[i]
-		if e.kind == entryTool && e.output != "" && (e.outputRendered == "" || e.outputWidth != width) {
+		if e.kind == entryTool && e.output != "" && (!isCommand(*e) || commandsOpen) && (e.outputRendered == "" || e.outputWidth != width) {
 			language := "text"
 			if strings.HasPrefix(e.output, "File: ") {
 				language = "diff"
@@ -314,8 +320,8 @@ func renderEntries(entries []entry, width int, label string, frame int, showThou
 			b.WriteString("\n")
 		}
 		switch {
-		case e.kind == entryTool && running(e.status):
-			b.WriteString(renderTool(*e, width, frame)) // animated, so never cached
+		case e.kind == entryTool:
+			b.WriteString(renderTool(*e, width, frame, commandsOpen))
 		case e.kind == entryThought:
 			b.WriteString(renderThought(*e, width, showThoughts))
 		default:
@@ -368,7 +374,12 @@ func renderEntry(e entry, width int, label string, continued bool) string {
 
 // renderTool is one tool call: a spinner while it runs, then ● or ✕, and its
 // name with what it acts on, as in Read(main.go) or Shell(ls internal).
-func renderTool(e entry, width, frame int) string {
+func isCommand(e entry) bool {
+	name := strings.ToLower(strings.TrimSpace(e.name))
+	return strings.EqualFold(e.toolKind, "execute") || name == "shell" || name == "bash" || name == "terminal" || name == "execute" || strings.HasPrefix(name, "shell ") || strings.HasPrefix(name, "shell(") || strings.HasPrefix(name, "bash ") || strings.HasPrefix(name, "bash(")
+}
+
+func renderTool(e entry, width, frame int, showCommands ...bool) string {
 	mark := warningStyle.Render(toolFrames[frame%len(toolFrames)])
 	switch e.status {
 	case "completed":
@@ -390,6 +401,9 @@ func renderTool(e entry, width, frame int) string {
 	}
 	result := "  " + mark + " " + head
 	if e.output != "" {
+		if isCommand(e) && (len(showCommands) == 0 || !showCommands[0]) {
+			return result + dimStyle.Render(fmt.Sprintf(" · %d lines · ctrl+e to show", len(strings.Split(strings.TrimSuffix(e.output, "\n"), "\n"))))
+		}
 		output := e.outputRendered
 		if output == "" || e.outputWidth != width {
 			language := "text"

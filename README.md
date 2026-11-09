@@ -92,6 +92,8 @@ folder).
 Use Page Up/Page Down to move through output and Ctrl+Home/Ctrl+End to jump to
 the beginning or latest output. Fenced code in agent replies is highlighted
 and framed; a block still arriving is marked “streaming”.
+Command output is collapsed by default; press Ctrl+E to show or hide it. File
+reads and edits remain visible.
 
 The mouse wheel scrolls the conversation, agent view, or open reading panel,
 including inside tmux with mouse mode enabled. When mouse reporting is active,

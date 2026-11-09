@@ -107,6 +107,7 @@ type model struct {
 	modalTop         int    // first line shown in a reading panel
 	agentTop         int    // first line shown in an agent view; -1 follows the end
 	showThoughts     bool   // ctrl+t
+	showCommands     bool   // ctrl+e
 	resume           string // session to reopen on connect
 	palette          []slashCommand
 	paletteIndex     int
@@ -126,7 +127,9 @@ func New(opts Options) model {
 		viewport.WithWidth(80),
 		viewport.WithHeight(18),
 	)
-	viewportModel.SoftWrap = true
+	// Wrap once when content changes instead of rescanning every line on
+	// every scroll event (viewport SoftWrap calculates widths repeatedly).
+	viewportModel.SoftWrap = false
 
 	m := model{
 		ctx:        ctx,

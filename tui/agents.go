@@ -237,7 +237,7 @@ func (m model) agentHead(inner int) []string {
 // agentBody is the followed agent's transcript, with its activity line.
 func (m model) agentBody(inner int) string {
 	name := m.focus[strings.LastIndexByte(m.focus, '/')+1:]
-	body := renderEntries(m.agentEntries[m.focus], inner, name, m.frame, m.showThoughts)
+	body := renderEntries(m.agentEntries[m.focus], inner, name, m.frame, m.showThoughts, m.showCommands)
 	if since, busy := m.agentBusy[m.focus]; busy {
 		body = strings.TrimLeft(body+"\n\n", "\n") + activityLine(activity(m.agentEntries[m.focus]), since, m.frame, "ctrl+x to stop")
 	}
@@ -274,5 +274,5 @@ func (m model) agentHint() string {
 	if _, busy := m.agentBusy[m.focus]; busy {
 		hint = "ctrl+x stop · " + hint
 	}
-	return hint + " · ctrl+t thinking"
+	return hint + " · ctrl+t thinking · ctrl+e command output"
 }
