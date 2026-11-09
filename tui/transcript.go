@@ -503,7 +503,8 @@ func renderCodeBlock(language, code string, width int, closed bool) string {
 	}
 	// Glamour handles syntax highlighting; Switch's shared border and text
 	// colors keep the frame consistent with the rest of the interface.
-	inner := max(8, width-4)
+	inner := max(8, width-8)
+	code = strings.ReplaceAll(code, "\t", "    ")
 	fence := "```"
 	for strings.Contains(code, fence) {
 		fence += "`"

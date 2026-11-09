@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/viewport"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/urizennnn/switch/internal/chat"
 	"github.com/urizennnn/switch/internal/config"
@@ -15,6 +16,9 @@ import (
 )
 
 func TestCodeBlocksAreBoundedAndStreamingIsLabeled(t *testing.T) {
+	if got := lipgloss.Width(renderCodeBlock("go", "func main() {\n\tfmt.Println(\"hello\")\n}", 62, true)); got > 62 {
+		t.Errorf("code block width = %d, want <= 62", got)
+	}
 	got := ansi.Strip(renderMarkdown("Before\n\n```go\nfunc main() {}\n```\n\nAfter", 60))
 	for _, want := range []string{"Before", "go", "func main()", "After", "╭", "╰"} {
 		if !strings.Contains(got, want) {

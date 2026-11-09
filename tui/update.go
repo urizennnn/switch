@@ -431,10 +431,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.WindowSizeMsg:
+		follow := m.viewport.AtBottom() || m.viewport.TotalLineCount() == 0
 		m.width = msg.Width
 		m.height = msg.Height
 		m.layout()
 		m.refreshViewport()
+		if follow {
+			m.viewport.GotoBottom()
+		}
 		return m, nil
 
 	case connectedMsg:

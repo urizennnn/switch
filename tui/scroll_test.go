@@ -56,6 +56,10 @@ func TestScrollConversationAgentViewAndPanels(t *testing.T) {
 	if !strings.Contains(ansi.Strip(m.screen()), "fresh") {
 		t.Fatal("ctrl+end did not return to the latest output")
 	}
+	update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	if !strings.Contains(ansi.Strip(m.screen()), "fresh") {
+		t.Fatal("resizing while following lost the latest output")
+	}
 
 	// An agent view: scrolls back, then follows again at the end.
 	for i := 1; i <= 60; i++ {
