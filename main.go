@@ -38,13 +38,22 @@ func main() {
 		case "help", "-h", "--help":
 			usage()
 			return
+		case "--resume", "-r":
+			if len(os.Args) != 3 {
+				fmt.Fprintln(os.Stderr, "usage: switch --resume <session-id>")
+				os.Exit(2)
+			}
+			if err := runTUI(os.Args[2]); err != nil {
+				log.Fatal(err)
+			}
+			return
 		default:
 			fmt.Fprintln(os.Stderr, "switch is a TUI. Run `switch`, then type /help.")
 			os.Exit(2)
 		}
 	}
 
-	if err := runTUI(); err != nil {
+	if err := runTUI(""); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -91,7 +100,8 @@ func control(args []string) int {
 	}
 }
 
-func runTUI() error {
+// runTUI starts the TUI in a new session, or reopens resume.
+func runTUI(resume string) error {
 	project, err := os.Getwd()
 	if err != nil {
 		return err
@@ -113,6 +123,11 @@ func runTUI() error {
 
 	ctx := context.Background()
 	lead := resolveLead(ctx, cfg, state, project)
+	if resume != "" {
+		if lead, err = sessionLead(ctx, cfg, state, project, resume); err != nil {
+			return err
+		}
+	}
 
 	program := tea.NewProgram(tui.New(tui.Options{
 		Context: ctx,
@@ -123,9 +138,41 @@ func runTUI() error {
 		Fleet:   cfg.Fleet(),
 		Lead:    lead,
 		Run:     cfg.Run,
+		Resume:  resume,
 	}))
-	_, err = program.Run()
+	// Alternate scroll mode makes the terminal send the mouse wheel as ↑/↓ in
+	// the alternate screen, so the TUI scrolls without capturing the mouse
+	// and click-and-drag still selects text. The terminal's own setting is
+	// saved first and restored on exit.
+	fmt.Print("\x1b[?1007s\x1b[?1007h")
+	defer fmt.Print("\x1b[?1007r")
+	final, err := program.Run()
+	if m, ok := final.(interface{ ResumeID() string }); ok && err == nil {
+		if id := m.ResumeID(); id != "" {
+			fmt.Printf("\nResume this session:\n  switch --resume %s\n", id)
+		}
+	}
 	return err
+}
+
+// sessionLead is the configured agent that owns a session of this project.
+func sessionLead(ctx context.Context, cfg config.Config, state *store.Store, project, id string) (config.Agent, error) {
+	sessions, err := state.Sessions(ctx, project, 1000)
+	if err != nil {
+		return config.Agent{}, err
+	}
+	for _, s := range sessions {
+		if s.ID != id {
+			continue
+		}
+		for _, agent := range cfg.Fleet() {
+			if agent.Name == s.AgentName || (s.AgentName == "" && agent.Driver == s.Driver) {
+				return agent, nil
+			}
+		}
+		return config.Agent{}, fmt.Errorf("session %s belongs to %s, which is no longer a configured agent", id, s.AgentName)
+	}
+	return config.Agent{}, fmt.Errorf("no session %s in %s; run switch --resume from the folder it belongs to", id, project)
 }
 
 // resolveLead picks the lead from configured agents only: the stored lead
@@ -157,7 +204,8 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `switch — multi-agent orchestration for coding agents
 
 Usage:
-  switch                  start the TUI
+  switch                  start the TUI in a new session
+  switch --resume <id>    reopen a past session of this folder (-r)
   switch help             show this help
   switch version          print the version
 
@@ -168,7 +216,7 @@ Inside the TUI, type / to open the command palette:
   /doctor                 check config, rules, adapters, and state
   /init                   create .switch config and rules
   /rules                  show effective rules
-  /session                show the current agent session
+  /session                show and pick sessions (also /resume)
   /lead <agent>           choose which configured agent leads
   /adapters               install or uninstall ACP adapters
   /new                    start a new agent session

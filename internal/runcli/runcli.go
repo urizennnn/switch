@@ -126,6 +126,7 @@ func run(command string, args []string, f flags) error {
 		if err != nil {
 			return err
 		}
+		server.SetSubagents(engine)
 		outcome, err := engine.Run(ctx)
 		printer.flush()
 		fmt.Printf("\nrun %s: %s\n", shortID(runID), outcome)
@@ -142,10 +143,19 @@ func run(command string, args []string, f flags) error {
 		if err != nil {
 			return err
 		}
+		subagents, err := state.SubagentsForRun(ctx, runID)
+		if err != nil {
+			return err
+		}
 		for _, task := range tasks {
 			fmt.Printf("%-16s %-11s %-10s attempts=%d  %s\n", planID(task.ID), task.Status, orDash(task.Assignee), task.Attempts, task.Title)
 			if task.LastError != "" {
 				fmt.Printf("%16s last error: %s\n", "", firstLine(task.LastError))
+			}
+			for _, sa := range subagents {
+				if sa.TaskID == task.ID {
+					fmt.Printf("%16s └ %-12s %-11s %s\n", "", sa.Name, sa.Status, firstLine(sa.Brief))
+				}
 			}
 		}
 		return nil

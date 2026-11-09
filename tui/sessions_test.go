@@ -43,11 +43,13 @@ func TestResumePickerRules(t *testing.T) {
 		{ID: "past", AgentName: "builder-1", Driver: "claude"},
 	}}
 
+	picker := m.sessionPicker
 	next, cmd := m.handleSessionPickerKey(keyEnter())
 	m = next.(model)
-	if cmd != nil || !strings.Contains(m.sessionPicker.err, "current session") {
-		t.Fatalf("resuming the current session: err=%q", m.sessionPicker.err)
+	if cmd != nil || m.sessionPicker != nil {
+		t.Fatal("enter on the current session should just close the picker")
 	}
+	m.sessionPicker = picker
 	m.sessionPicker.index = 1
 	next, cmd = m.handleSessionPickerKey(keyEnter())
 	m = next.(model)
@@ -83,8 +85,8 @@ func TestResumedShowsThatSessionAndReportsFallback(t *testing.T) {
 	fresh := &chat.Chat{Project: "/p", Store: state, Session: &acpdriver.Session{ID: "fresh"}}
 	next, _ = m.handleResumed(resumedMsg{agent: agent, chat: fresh, status: chat.Status{ResumeError: errors.New("not found")}})
 	m = next.(model)
-	if !strings.Contains(m.modal, "new one was started") || len(m.entries) != 0 {
-		t.Fatalf("fallback: modal=%q entries=%d", m.modal, len(m.entries))
+	if !strings.Contains(m.toastText(), "new one was started") || len(m.entries) != 0 {
+		t.Fatalf("fallback: toast=%q entries=%d", m.toastText(), len(m.entries))
 	}
 }
 
@@ -111,5 +113,37 @@ func TestSidebarShowsOneLead(t *testing.T) {
 		if w := lipgloss.Width(line); w > 26 {
 			t.Fatalf("line wider than the panel (%d): %q", w, line)
 		}
+	}
+}
+
+func TestSessionPickerAndResumeID(t *testing.T) {
+	state, err := store.Open(filepath.Join(t.TempDir(), "switch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	ctx := context.Background()
+	project := t.TempDir()
+	_ = state.SaveChatSession(ctx, store.ChatSession{Project: project, Name: "lead", Agent: "opencode", SessionID: "old"})
+	_ = state.AppendMessage(ctx, project, "old", "user", "an earlier question")
+
+	m := New(Options{Context: ctx, Project: project, Store: state, Lead: config.Agent{Name: "lead", Driver: "opencode"}})
+	m.chat = &chat.Chat{Agent: "opencode", Session: &acpdriver.Session{ID: "now"}}
+	if m.ResumeID() != "" {
+		t.Fatal("an empty session is offered for resuming")
+	}
+	m.appendUser("hi")
+	if m.ResumeID() != "now" {
+		t.Fatalf("ResumeID = %q", m.ResumeID())
+	}
+
+	next, _ := m.handleSlash("/session")
+	m = next.(model)
+	if p := m.sessionPicker; p == nil || len(p.sessions) != 2 || p.sessions[0].ID != "now" || p.sessions[1].ID != "old" {
+		t.Fatalf("picker = %+v", m.sessionPicker)
+	}
+	m.width, m.height = 120, 30
+	if out := m.sessionPickerContent(80); !strings.Contains(out, "current") || !strings.Contains(out, "switch --resume now") {
+		t.Fatalf("picker content:\n%s", out)
 	}
 }

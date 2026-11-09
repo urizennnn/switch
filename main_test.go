@@ -38,3 +38,28 @@ func TestResolveLeadIgnoresBareAdapterName(t *testing.T) {
 		t.Fatalf("stored agent name: lead = %q, want builder-1", got.Name)
 	}
 }
+
+func TestSessionLeadFindsTheOwner(t *testing.T) {
+	state, err := store.Open(filepath.Join(t.TempDir(), "switch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	ctx := context.Background()
+	project := t.TempDir()
+	cfg := config.Config{Agents: []config.Agent{
+		{Name: "lead", Role: "lead", Driver: "opencode"},
+		{Name: "builder-1", Role: "builder", Driver: "claude"},
+	}}
+	if err := state.SaveChatSession(ctx, store.ChatSession{Project: project, Name: "builder-1", Agent: "claude", SessionID: "ses_b"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = state.AppendMessage(ctx, project, "ses_b", "user", "hello")
+
+	if agent, err := sessionLead(ctx, cfg, state, project, "ses_b"); err != nil || agent.Name != "builder-1" {
+		t.Fatalf("sessionLead = %q, %v", agent.Name, err)
+	}
+	if _, err := sessionLead(ctx, cfg, state, t.TempDir(), "ses_b"); err == nil {
+		t.Fatal("found a session from another folder")
+	}
+}

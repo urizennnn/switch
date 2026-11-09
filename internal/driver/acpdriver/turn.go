@@ -16,6 +16,8 @@ type TurnOptions struct {
 	OnPermission func(*PermissionRequest)
 	// OnUsage receives the turn's token counts and the latest reported cost.
 	OnUsage func(UsageInfo)
+	// OnEvent receives every session event of the turn, for live views.
+	OnEvent func(Event)
 }
 
 // RunTurn sends one prompt, streams it, and blocks until the turn ends. It
@@ -38,6 +40,9 @@ func (s *Session) RunTurn(ctx context.Context, prompt string, opts TurnOptions) 
 	for {
 		select {
 		case event := <-s.Events:
+			if opts.OnEvent != nil {
+				opts.OnEvent(event)
+			}
 			switch event.Type {
 			case EventMessage:
 				output.WriteString(event.Text)

@@ -14,7 +14,11 @@ import (
 // View draws the TUI in the terminal's alternate screen, so it starts on a
 // clean screen and leaves the shell's scrollback untouched on exit.
 func (m model) View() tea.View {
-	v := tea.NewView(m.screen())
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	v := tea.NewView(m.withToasts(m.screen(), width))
 	v.AltScreen = true
 	return v
 }
@@ -27,13 +31,14 @@ func (m model) screen() string {
 
 	base := lipgloss.JoinVertical(
 		lipgloss.Left,
-		m.headerView(width),
 		m.bodyView(width),
 		inputBar(width, m.input.View()),
 		m.statusView(width),
 	)
 
 	switch {
+	case m.permission != nil:
+		return m.withModal(base, width, "permission", m.permissionContent(), "1-9 choose · esc deny")
 	case m.adapterPicker != nil:
 		footer := "↑/↓ select · enter act · esc cancel"
 		if m.adapterPicker.pending != "" {
@@ -41,18 +46,17 @@ func (m model) screen() string {
 		}
 		return m.withModal(base, width, "ACP adapters", m.adapterPickerContent(width), footer)
 	case m.rulesReview != nil:
-		return m.withModal(base, width, "this project has rules", "Switch sends these to agents in this project. They come from the repository, so read them before they are used.\n\n"+m.rulesReview.text,
-			"enter use them · esc not this session")
+		return m.scrolledModal(base, width)
 	case m.rulesManager != nil:
 		return m.withModal(base, width, "rules", m.rulesManagerContent(min(82, max(44, width*2/3))), rulesManagerFooter(m.rulesManager))
 	case m.sessionPicker != nil:
-		return m.withModal(base, width, "resume a session", m.sessionPickerContent(min(82, max(44, width*2/3))), "↑/↓ select · enter resume · esc cancel")
+		return m.withModal(base, width, "sessions", m.sessionPickerContent(min(82, max(44, width*2/3))), "↑/↓ select · enter open · n new session · esc close")
 	case m.taskPicker != nil:
 		return m.withModal(base, width, "tasks", m.taskPickerContent(min(82, max(44, width*2/3))), "enter details · a approve · r reject · d diff · t retry · esc")
 	case m.picker != nil:
 		return m.withModal(base, width, "choose lead", m.pickerContent(width), "↑/↓ select · enter choose · esc cancel")
 	case m.modal != "":
-		return m.withModal(base, width, m.modalTitle, m.modal, "esc or enter to close")
+		return m.scrolledModal(base, width)
 	}
 
 	if !m.paletteOpen {
@@ -118,7 +122,7 @@ func (m model) bodyHeight() int {
 	if height <= 0 {
 		height = 24
 	}
-	return max(8, height-9)
+	return max(8, height-4) // the input bar and status line take the other rows
 }
 
 func (m model) paneWidths(width int) (sidebarWidth, mainWidth int) {
@@ -128,18 +132,6 @@ func (m model) paneWidths(width int) (sidebarWidth, mainWidth int) {
 	sidebarWidth = min(34, max(26, width/4))
 	mainWidth = max(24, width-sidebarWidth-5)
 	return sidebarWidth, mainWidth
-}
-
-func (m model) headerView(width int) string {
-	project := m.project
-	if project == "" && m.chat != nil {
-		project = m.chat.Project
-	}
-	left := brandStyle.Render("switch") +
-		mutedStyle.Render("  "+truncate(project, max(12, width/3)))
-
-	right := mutedStyle.Render(m.lead.Name + " · lead")
-	return appHeader(width, left, right)
 }
 
 func (m model) bodyView(width int) string {
@@ -192,10 +184,15 @@ func (m model) sidebarContent(width int) string {
 			state = truncate(state, max(4, inner/2))
 			name := truncate(agent.Name, max(4, inner-2-lipgloss.Width(state)-1))
 			gap := max(1, inner-2-lipgloss.Width(name)-lipgloss.Width(state))
-			b.WriteString(dimStyle.Render("○ ") + textStyle.Render(name) + strings.Repeat(" ", gap) + stateStyle.Render(state))
+			nameStyle := textStyle
+			if m.focus == agent.Name {
+				nameStyle = activeStyle
+			}
+			b.WriteString(dimStyle.Render("○ ") + nameStyle.Render(name) + strings.Repeat(" ", gap) + stateStyle.Render(state))
 			b.WriteString("\n")
 			b.WriteString(dimStyle.Render("  " + truncate(agent.Role+" · "+agent.Driver, inner-2)))
 			b.WriteString("\n")
+			b.WriteString(m.subagentRows(agent.Name, inner))
 		}
 	}
 
@@ -246,15 +243,23 @@ func (m model) sidebarContent(width int) string {
 
 func (m model) mainTitle() string {
 	switch {
+	case m.focus != "":
+		if m.agentTop >= 0 {
+			total, room := m.agentLines()
+			return m.breadcrumb() + below(total-m.agentTop-room)
+		}
+		return m.breadcrumb()
 	case m.home:
 		return "overview"
 	default:
-		return "conversation"
+		return "conversation" + below(m.viewport.TotalLineCount()-m.viewport.YOffset()-m.viewport.VisibleLineCount())
 	}
 }
 
 func (m model) mainContent(width, height int) string {
 	switch {
+	case m.focus != "":
+		return m.agentContent(width, height)
 	case m.chat == nil && m.connectErr != nil && m.home:
 		return errorStyle.Render("could not start "+m.lead.Name) + "\n\n" +
 			textStyle.Width(max(10, width-4)).Render(firstLine(m.connectErr.Error())) + "\n\n" +
@@ -385,57 +390,6 @@ func (m model) adapterPickerContent(width int) string {
 	return b.String()
 }
 
-func (m model) statusView(width int) string {
-	driver := m.lead.Driver
-	model := m.lead.Model
-	sessionID := ""
-	if m.chat != nil {
-		if m.state != "starting lead" {
-			sessionID = m.chat.Session.ID
-		}
-		if m.chat.Agent == m.lead.Driver {
-			model = m.chat.Model
-		}
-	}
-	if i := strings.LastIndex(model, "/"); i >= 0 {
-		model = model[i+1:]
-	}
-	if model == "" {
-		model = "default"
-	}
-	left := brandStyle.Render("● ") +
-		textStyle.Render(m.lead.Name) +
-		dimStyle.Render(" · ") +
-		mutedStyle.Render(driver+" · "+truncate(model, 28))
-	if sessionID != "" {
-		left += dimStyle.Render(" · " + shortID(sessionID))
-	}
-
-	stateStyle := mutedStyle
-	switch m.state {
-	case "ready":
-		stateStyle = successStyle
-	case "connecting", "planning", "running", "checking", "new session", "starting lead", "working", "cancelling":
-		stateStyle = warningStyle
-	case "error", "exited", "agent unavailable":
-		stateStyle = errorStyle
-	}
-
-	parts := make([]string, 0, 3)
-	if m.run != nil {
-		queued, active, review, merged, _ := m.taskCounts()
-		parts = append(parts, dimStyle.Render("run "+shortID(m.run.ID))+" "+mutedStyle.Render(fmt.Sprintf("%dq/%da/%dr/%dm", queued, active, review, merged)))
-	}
-	if m.installing != "" {
-		parts = append(parts, warningStyle.Render(m.installing+"…"))
-	}
-	parts = append(parts, stateStyle.Render(strings.ToUpper(m.state)))
-	parts = append(parts, dimStyle.Render("/ commands"))
-	right := strings.Join(parts, dimStyle.Render("  ·  "))
-
-	return statusBar(width, left, right)
-}
-
 func (m model) paletteView(width int) string {
 	maxRows := min(6, max(3, m.bodyHeight()-5))
 	start := 0
@@ -467,6 +421,9 @@ func sessionState(resumed bool) string {
 }
 
 func (m model) jobLogView(width, height int) string {
+	if m.job == "plan" {
+		return m.planProgress(width, height)
+	}
 	text := m.jobLogText()
 	if text == "" {
 		text = dimStyle.Render("waiting for the agent…")
@@ -538,4 +495,28 @@ func (m model) workers() []config.Agent {
 		}
 	}
 	return out
+}
+
+// permissionContent shows who asks to do what, and the answers.
+func (m model) permissionContent() string {
+	p := m.permission
+	who := m.lead.Name
+	if p.Agent != "" {
+		who = strings.ReplaceAll(p.Agent, "/", " › ")
+	}
+	var b strings.Builder
+	b.WriteString(textStyle.Bold(true).Render(who) + mutedStyle.Render(" wants to") + "\n\n")
+	action := p.Title
+	if p.Kind != "" {
+		action = p.Kind + " · " + action
+	}
+	b.WriteString(textStyle.Render(action) + "\n\n")
+	for i, option := range p.Options {
+		style := mutedStyle
+		if strings.HasPrefix(option.Kind, "allow") {
+			style = textStyle
+		}
+		b.WriteString(labelStyle.Render(fmt.Sprintf("%d", i+1)) + "  " + style.Render(option.Name) + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }

@@ -34,13 +34,22 @@ type team struct {
 	lead    string
 	warm    map[string]*acpdriver.Session
 	warming map[string]bool
-	asked   map[string]bool // answering a switch_ask right now
+	asked   map[string]bool               // answering a switch_ask right now
+	active  map[string]*acpdriver.Session // the session answering, so it can be stopped
+	subs    map[string]*chatSub           // subagents of teammates, by worker/name
+
+	// Set by the TUI before the team is used.
+	ctx    context.Context
+	events chan<- streamMsg                    // live views of teammates and their subagents
+	perms  chan<- *acpdriver.PermissionRequest // actions that need the user's answer
+	subCfg config.SubagentConfig
 }
 
 func newTeam(project string, fleet []config.Agent, lead string) *team {
 	return &team{
 		project: project, fleet: fleet, lead: lead,
 		warm: map[string]*acpdriver.Session{}, warming: map[string]bool{}, asked: map[string]bool{},
+		active: map[string]*acpdriver.Session{}, subs: map[string]*chatSub{}, ctx: context.Background(),
 	}
 }
 
@@ -55,6 +64,7 @@ func (t *team) listen() {
 			Team:     t,
 		})
 		if err == nil {
+			server.SetSubagents(t)
 			t.server = server
 		}
 	})
@@ -169,6 +179,9 @@ func (t *team) status(name string) string {
 
 // close stops every warm session in parallel and the team server.
 func (t *team) close() {
+	for _, agent := range t.fleet {
+		t.stopSubs(agent.Name)
+	}
 	t.mu.Lock()
 	sessions := t.warm
 	t.warm = map[string]*acpdriver.Session{}
@@ -248,12 +261,32 @@ func (t *team) Ask(ctx context.Context, from, to, message string) (string, error
 		}
 	}
 	defer t.park(to, session) // stays warm for the next question or a lead switch
+	t.mu.Lock()
+	t.active[to] = session
+	t.mu.Unlock()
+	defer func() {
+		t.mu.Lock()
+		delete(t.active, to)
+		t.mu.Unlock()
+		t.stopSubs(to) // they only serve this answer
+	}()
 
 	prompt := fmt.Sprintf("You are %s (%s) on a Switch team working in %s. Your teammate %s asks:\n\n%s\n\n"+
 		"Answer directly and concisely. Do not edit files; %s decides what happens next.", to, agent.Role, t.project, from, message, from)
+	if t.subCfg.MaxPerBuilder > 0 {
+		prompt += fmt.Sprintf("\n\nYou can start up to %d read-only subagents with switch_spawn to explore in parallel. "+
+			"Collect their results with switch_wait before you answer; they stop when you answer.", t.subCfg.MaxPerBuilder)
+	}
+	t.emit(to, acpdriver.Event{Type: acpdriver.EventStart, Text: from + " asks: " + message})
 	turnCtx, cancel := context.WithTimeout(ctx, 9*time.Minute)
 	defer cancel()
-	reply, err := session.RunTurn(turnCtx, prompt, acpdriver.TurnOptions{Permission: acpdriver.PermissionDeny})
+	reply, err := session.RunTurn(turnCtx, prompt, acpdriver.TurnOptions{
+		OnEvent:      func(event acpdriver.Event) { t.emit(to, event) },
+		OnPermission: t.permit(to),
+	})
+	if err != nil {
+		t.emit(to, acpdriver.Event{Type: acpdriver.EventError, Err: err})
+	}
 	if err != nil {
 		return "", fmt.Errorf("%s did not answer: %w", to, err)
 	}

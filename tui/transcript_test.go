@@ -7,11 +7,40 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/viewport"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/urizennnn/switch/internal/chat"
 	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/store"
 )
+
+func TestCodeBlocksAreBoundedAndStreamingIsLabeled(t *testing.T) {
+	got := ansi.Strip(renderMarkdown("Before\n\n```go\nfunc main() {}\n```\n\nAfter", 60))
+	for _, want := range []string{"Before", "go", "func main()", "After", "╭", "╰"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "streaming") {
+		t.Fatalf("closed block marked streaming: %s", got)
+	}
+	partial := ansi.Strip(renderMarkdown("```go\nfunc main()", 60))
+	if !strings.Contains(partial, "streaming") || !strings.Contains(partial, "func main()") {
+		t.Fatalf("partial block: %s", partial)
+	}
+}
+
+func TestToolOutputAppearsInTranscript(t *testing.T) {
+	var entries []entry
+	addTool(&entries, acpdriver.ToolInfo{ID: "t1", Title: "Read", Status: "in_progress"})
+	addTool(&entries, acpdriver.ToolInfo{ID: "t1", Status: "completed", Output: "line one\nline two"})
+	got := ansi.Strip(renderTool(entries[0], 60, 0))
+	for _, want := range []string{"Read", "line one", "line two", "╭", "╰"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+}
 
 func TestTranscriptToolsPlanAndMarkdown(t *testing.T) {
 	m := model{viewport: viewport.New(viewport.WithWidth(60), viewport.WithHeight(20))}

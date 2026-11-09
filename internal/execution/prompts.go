@@ -31,6 +31,38 @@ func WorkerPrompt(task store.Task, agent store.RunAgent, ruleSet rules.Set) stri
 	return b.String()
 }
 
+// subagentNote tells a worker it may start subagents and that it owns them.
+func subagentNote(limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(`
+You can start up to %d subagents at once for parts of this task with switch_spawn (name, brief, and the files each may edit;
+no files means read-only). They work in this worktree and report only to you, so you are responsible for them:
+collect results with switch_wait, steer them with switch_message, stop them with switch_stop, and check their work
+before you rely on it. Give each subagent different files. Finish or stop every subagent before switch_complete;
+any still running when your turn ends are stopped. Use them only when splitting the work clearly helps.
+`, limit)
+}
+
+// SubagentPrompt is the first turn of a subagent a worker started.
+func SubagentPrompt(task store.Task, sub store.Subagent, ruleSet rules.Set) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "You are %s, a subagent that %s started in a Switch run. You report only to %s.\n", sub.Name, sub.Parent, sub.Parent)
+	fmt.Fprintf(&b, "Work only inside this git worktree: %s. %s and its other subagents work in it too.\n\n", task.Worktree, sub.Parent)
+	fmt.Fprintf(&b, "%s is working on the task %q.\n\nYour job:\n%s\n", sub.Parent, task.Title, sub.Brief)
+	if len(sub.Files) > 0 {
+		writeList(&b, "Files you may edit (edit nothing else)", sub.Files)
+	} else {
+		b.WriteString("\nYou are read-only: do not create, edit, or delete any file.\n")
+	}
+	writeRules(&b, ruleSet)
+	b.WriteString("\nDo not commit, push, merge, or switch branches, and do not start subagents of your own.\n")
+	b.WriteString("When you are done, give your result with the switch_report MCP tool (or `$SWITCH_BIN __control agent report <result>`),\n")
+	fmt.Fprintf(&b, "then reply with the same result. Keep it short and concrete: %s reads only that.\n", sub.Parent)
+	return b.String()
+}
+
 // ReviewPrompt asks the lead to review one verified task.
 func ReviewPrompt(task store.Task, diff, evidence string, ruleSet rules.Set) string {
 	if len(diff) > maxReviewDiff {

@@ -629,6 +629,16 @@ Phases 2–6 are implemented. Packages:
   never pushes and never touches the user's branches.
 - **Budgets:** `max_turns` (worker and review turns per run) and
   `max_tokens` stop dispatching; `max_attempts` bounds each task.
+- **Subagents** (`internal/execution/subagents.go`, table `subagents`): a
+  worker's `switch_spawn` starts an ACP turn as `<worker>/<name>` with role
+  `subagent` in the worker's worktree. Limits: `[run.subagents]
+  max_per_builder` running per worker, optional `drivers` allow-list,
+  disjoint file claims among running siblings, the run budget, and one level
+  only (the control plane refuses the lead and subagents). Follow-ups queue
+  until the current turn ends or restart a finished subagent in its session.
+  `switch_complete` is refused while any run; `process` stops leftovers after
+  the worker's turn, before verification. Recovery marks running ones
+  `interrupted`.
 - **Recovery:** on start, `running`/`verifying`/`reviewing` tasks become
   `interrupted` and `approved` returns to `review` (merging is idempotent).
   Adapter process groups are recorded under `<state>/pids`; a later start

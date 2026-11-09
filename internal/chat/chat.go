@@ -21,6 +21,7 @@ type Options struct {
 	Rules     rules.Set
 	Store     *store.Store
 	New       bool
+	SessionID string // resume this session instead of the stored one
 	AgentLogs io.Writer
 	// Grant returns the MCP servers and environment that let an agent's
 	// session reach its team (switch_team, switch_ask).
@@ -76,8 +77,8 @@ func Open(ctx context.Context, opts Options) (*Chat, Status, error) {
 	if model == "" && hasStored && !opts.New && stored.Agent == agent {
 		model = stored.Model
 	}
-	sessionID := ""
-	if hasStored && !opts.New && stored.Agent == agent {
+	sessionID := opts.SessionID
+	if sessionID == "" && hasStored && !opts.New && stored.Agent == agent {
 		sessionID = stored.SessionID
 	}
 

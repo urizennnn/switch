@@ -65,6 +65,38 @@ var tools = []tool{
 		InputSchema: messageSchema("summary of the change")},
 	{Name: "switch_block", method: "block", Description: "Report that you cannot complete the task. The task is handed to the user instead of being verified.",
 		InputSchema: messageSchema("why the task cannot be done and what is needed")},
+	{Name: "switch_spawn", method: "spawn", Description: "Workers only: start a subagent for part of your task. It works in your worktree, reports only to you, and runs until it finishes; collect its result with switch_wait. You are responsible for checking its work.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name":   map[string]any{"type": "string", "description": "a short name, such as scout or tests"},
+				"brief":  map[string]any{"type": "string", "description": "what it must do and what result to report back"},
+				"files":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "files or directories it may edit, relative to the worktree; omit for a read-only subagent"},
+				"driver": map[string]any{"type": "string", "description": "the ACP adapter to run it on; defaults to yours"},
+				"model":  map[string]any{"type": "string", "description": "the model; defaults to yours when the adapter is the same"},
+			},
+			"required": []string{"name", "brief"},
+		}},
+	{Name: "switch_wait", method: "wait", Description: "Workers only: wait for your subagents to finish (all of them, or the named ones) and get their results.",
+		InputSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"names": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "subagents to wait for; omit for all"}},
+		}},
+	{Name: "switch_message", method: "message", Description: "Workers only: send a follow-up to one of your subagents. A running one gets it when its current turn ends; a finished one starts again.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name":    map[string]any{"type": "string"},
+				"message": map[string]any{"type": "string"},
+			},
+			"required": []string{"name", "message"},
+		}},
+	{Name: "switch_stop", method: "stop", Description: "Workers only: stop one of your subagents, or all of them when name is omitted.",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"name": map[string]any{"type": "string"}}}},
+	{Name: "switch_subagents", method: "subagents", Description: "Workers only: list your subagents with their status and results.",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}}},
+	{Name: "switch_report", method: "report", Description: "Subagents only: give your result to the worker that started you, then end your turn.",
+		InputSchema: messageSchema("your result: what you found or changed")},
 	{Name: "switch_delegate", method: "delegate", Description: "Lead only: add a task to the run.",
 		InputSchema: map[string]any{
 			"type": "object",

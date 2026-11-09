@@ -19,7 +19,20 @@ import (
 // with feedback, blocked, or interrupted.
 func (e *Engine) process(ctx context.Context, task store.Task, agent store.RunAgent) {
 	err := e.work(ctx, &task, agent)
+	// The worker handles its subagents; whatever it left running must not
+	// keep editing the worktree while it is verified and committed.
+	if n, _ := e.Stop(agent.Name, task.ID, ""); n > 0 {
+		e.update(task, agent.Name, fmt.Sprintf("stopped %d subagents still running when the turn ended", n))
+	}
 	if e.interrupted(ctx, task, agent) {
+		return
+	}
+	e.stopMu.Lock()
+	stopped := e.stopping[task.ID]
+	delete(e.stopping, task.ID)
+	e.stopMu.Unlock()
+	if stopped {
+		e.finish(task, agent, StatusBlocked, "stopped by you; /retry runs it again")
 		return
 	}
 	if err != nil {
@@ -78,12 +91,21 @@ func (e *Engine) work(ctx context.Context, task *store.Task, agent store.RunAgen
 	}
 	turnCtx, cancel := context.WithTimeout(ctx, time.Duration(e.opts.Config.TurnTimeout)*time.Second)
 	defer cancel()
+	e.stopMu.Lock()
+	e.turns[agent.Name] = cancel
+	e.stopMu.Unlock()
+	defer func() {
+		e.stopMu.Lock()
+		delete(e.turns, agent.Name)
+		e.stopMu.Unlock()
+	}()
 	result, err := e.opts.Turn(turnCtx, TurnRequest{
+		Label:      task.Title,
 		Agent:      agent,
 		TaskID:     task.ID,
 		Cwd:        task.Worktree,
 		SessionID:  task.SessionID,
-		Prompt:     WorkerPrompt(*task, agent, scoped),
+		Prompt:     WorkerPrompt(*task, agent, scoped) + subagentNote(e.opts.Config.Subagents.MaxPerBuilder),
 		Permission: e.opts.Permission,
 		Ask:        e.opts.OnPermission != nil,
 	})
@@ -106,6 +128,27 @@ const (
 	verdictReject
 )
 
+// StopWorker cancels a worker's running task turn. The task is blocked for
+// the user instead of retried.
+func (e *Engine) StopWorker(name string) bool {
+	e.stopMu.Lock()
+	defer e.stopMu.Unlock()
+	cancel, ok := e.turns[name]
+	if !ok {
+		return false
+	}
+	ctx, done := saveContext()
+	defer done()
+	tasks, _ := e.opts.Store.TasksForRun(ctx, e.run.ID)
+	for _, task := range tasks {
+		if task.Assignee == name && task.Status == StatusRunning {
+			e.stopping[task.ID] = true
+		}
+	}
+	cancel()
+	return true
+}
+
 // leadReview asks the run's lead to review the task diff. A missing lead or a
 // failed review leaves the decision to the user; only an explicit REJECT
 // sends the task back.
@@ -125,6 +168,7 @@ func (e *Engine) leadReview(ctx context.Context, task store.Task, evidence strin
 	turnCtx, cancel := context.WithTimeout(ctx, time.Duration(e.opts.Config.TurnTimeout)*time.Second)
 	defer cancel()
 	result, err := e.opts.Turn(turnCtx, TurnRequest{
+		Label:      "review " + task.Title,
 		Agent:      lead,
 		TaskID:     task.ID,
 		Cwd:        task.Worktree,

@@ -82,11 +82,11 @@ func TestChatStaysUsableDuringAdapterInstall(t *testing.T) {
 		t.Fatal("an install marked the chat busy")
 	}
 	next, _ := m.handleSlash("/adapters")
-	if got := next.(model); got.adapterPicker != nil || !strings.Contains(got.modal, "still running") {
-		t.Fatalf("second install allowed: modal=%q", got.modal)
+	if got := next.(model); got.adapterPicker != nil || !strings.Contains(got.toastText(), "still running") {
+		t.Fatalf("second install allowed: toast=%q", got.toastText())
 	}
 	next, _ = m.Update(adapterActionMsg{name: "codex", action: "install globally"})
-	if got := next.(model); got.installing != "" || !strings.Contains(got.modal, "complete") {
-		t.Fatalf("after install: installing=%q modal=%q", got.installing, got.modal)
+	if got := next.(model); got.installing != "" || !strings.Contains(got.toastText(), "complete") {
+		t.Fatalf("after install: installing=%q toast=%q", got.installing, got.toastText())
 	}
 }

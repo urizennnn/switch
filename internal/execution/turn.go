@@ -45,8 +45,17 @@ func (e *Engine) acpTurn(ctx context.Context, req TurnRequest) (TurnResult, erro
 		name := req.Agent.Name
 		opts.OnText = func(text string) { e.opts.OnText(name, text) }
 	}
-	if req.Ask {
-		opts.OnPermission = e.opts.OnPermission
+	if e.opts.OnEvent != nil {
+		name := req.Agent.Name
+		e.opts.OnEvent(name, acpdriver.Event{Type: acpdriver.EventStart, Text: req.Label})
+		opts.OnEvent = func(event acpdriver.Event) { e.opts.OnEvent(name, event) }
+	}
+	if req.Ask && e.opts.OnPermission != nil {
+		name := req.Agent.Name
+		opts.OnPermission = func(request *acpdriver.PermissionRequest) {
+			request.Agent = name // shown as who is asking
+			e.opts.OnPermission(request)
+		}
 	}
 	result.Output, err = session.RunTurn(ctx, req.Prompt, opts)
 	return result, err

@@ -84,6 +84,23 @@ var executionTables = []string{
 		created_at TEXT NOT NULL
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_session_history_project ON session_history(project);`,
+	`CREATE TABLE IF NOT EXISTS subagents (
+		id TEXT PRIMARY KEY,
+		run_id TEXT NOT NULL,
+		task_id TEXT NOT NULL,
+		parent TEXT NOT NULL,
+		name TEXT NOT NULL,
+		driver TEXT NOT NULL,
+		model TEXT NOT NULL DEFAULT '',
+		brief TEXT NOT NULL,
+		files_json TEXT NOT NULL,
+		status TEXT NOT NULL,
+		summary TEXT NOT NULL DEFAULT '',
+		session_id TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_subagents_run ON subagents(run_id);`,
 }
 
 // executionColumns are added to tables created by older builds.

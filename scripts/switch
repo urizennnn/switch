@@ -1,5 +1,6 @@
 #!/bin/sh
 # Run Switch from this checkout, rebuilding it first when its sources changed.
+# Tests are not part of the binary, so editing them never triggers a rebuild.
 # Install: ln -s "$PWD/scripts/switch" ~/.local/bin/switch
 set -e
 
@@ -7,7 +8,7 @@ script=$(readlink -f "$0")
 repo=$(cd "$(dirname "$script")/.." && pwd)
 bin="$repo/switch"
 
-if [ ! -x "$bin" ] || [ -n "$(find "$repo" -path "$repo/.git" -prune -o \( -name '*.go' -o -name go.mod -o -name go.sum \) -newer "$bin" -print -quit)" ]; then
+if [ ! -x "$bin" ] || [ -n "$(find "$repo" -path "$repo/.git" -prune -o \( \( -name '*.go' ! -name '*_test.go' \) -o -name go.mod -o -name go.sum \) -newer "$bin" -print -quit)" ]; then
 	echo "switch: building…" >&2
 	go -C "$repo" build -o "$bin" . || { echo "switch: build failed" >&2; exit 1; }
 fi

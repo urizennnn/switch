@@ -29,6 +29,13 @@ type RunConfig struct {
 	TurnTimeout int `toml:"turn_timeout"`
 	MaxTurns    int `toml:"max_turns"`
 	MaxTokens   int `toml:"max_tokens"`
+	// Subagents bounds the helpers a worker may start for its task.
+	Subagents SubagentConfig `toml:"subagents"`
+}
+
+type SubagentConfig struct {
+	MaxPerBuilder int      `toml:"max_per_builder"` // running at once per worker; 0 turns subagents off
+	Drivers       []string `toml:"drivers"`         // adapters workers may start; empty means any
 }
 
 type Agent struct {
@@ -65,6 +72,7 @@ func Defaults(projectDir string) Config {
 			VerifyTimeout:  600,
 			TurnTimeout:    1800,
 			MaxTurns:       50,
+			Subagents:      SubagentConfig{MaxPerBuilder: 3},
 		},
 	}
 }
@@ -218,6 +226,10 @@ verify_timeout = 600  # seconds per verification command
 turn_timeout = 1800   # seconds per worker or review turn
 max_turns = 50        # worker turns per run (0 = unlimited)
 max_tokens = 0        # tokens per run (0 = unlimited)
+
+[run.subagents]
+max_per_builder = 3   # helpers each worker may run at once (0 = off)
+# drivers = ["claude", "codex"]  # adapters workers may start (default: any)
 
 [[agents]]
 name = "lead"

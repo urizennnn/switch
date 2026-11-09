@@ -59,7 +59,7 @@ func TestLeadCommandRejectsBareAdapterName(t *testing.T) {
 	if got.lead.Name != "lead" {
 		t.Fatalf("lead = %q, want unchanged", got.lead.Name)
 	}
-	if !strings.Contains(got.modal, "unknown agent") {
-		t.Fatalf("modal = %q, want unknown agent", got.modal)
+	if !strings.Contains(got.toastText(), "unknown agent") {
+		t.Fatalf("toast = %q, want unknown agent", got.toastText())
 	}
 }

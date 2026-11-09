@@ -100,6 +100,17 @@ func Execute(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 
+	// Check the repository before the lead spends minutes planning: every
+	// worker gets its own worktree branched from HEAD.
+	manager, err := worktree.New(ctx, project, config.StateDir())
+	if err != nil {
+		return nil, fmt.Errorf("this folder is not a git repository. Each worker gets its own git worktree, so run `git init` and make a first commit here, or start Switch inside a repository")
+	}
+	base, err := manager.Head(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("this repository has no commits yet. Make a first commit so workers have a base to branch from")
+	}
+
 	var planned plan.Plan
 	if opts.File != "" {
 		data, err := os.ReadFile(opts.File)
@@ -135,15 +146,6 @@ func Execute(ctx context.Context, opts Options) (*Result, error) {
 		return nil, fmt.Errorf("open state: %w", err)
 	}
 	defer state.Close()
-
-	manager, err := worktree.New(ctx, project, config.StateDir())
-	if err != nil {
-		return nil, err
-	}
-	base, err := manager.Head(ctx)
-	if err != nil {
-		return nil, err
-	}
 
 	runID := uuid.NewString()
 	integration, branch, err := manager.Integration(ctx, runID, base)

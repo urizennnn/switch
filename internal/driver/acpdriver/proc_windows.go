@@ -10,3 +10,5 @@ func configureProcess(cmd *exec.Cmd) {}
 func processAlive(pid int) bool { return false }
 
 func killGroup(pid int) error { return nil }
+
+func terminateGroup(pid int) error { return nil }

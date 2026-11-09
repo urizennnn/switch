@@ -26,17 +26,23 @@ type resumedMsg struct {
 	err    error
 }
 
+// openSessionPicker is /session and /resume: the current session on top,
+// then this project's past sessions to switch to.
 func (m model) openSessionPicker() (tea.Model, tea.Cmd) {
 	sessions, err := m.store.Sessions(m.ctx, m.project, 30)
 	if err != nil {
-		m.setModal("resume", err.Error())
+		m.fail("could not list sessions", err.Error())
 		return m, nil
 	}
-	if len(sessions) == 0 {
-		m.setModal("resume", "no past sessions with messages in this project yet")
-		return m, nil
+	current := store.SessionSummary{ID: m.chat.Session.ID, AgentName: m.lead.Name, Driver: m.chat.Agent, Model: m.chat.Model, UpdatedAt: time.Now()}
+	for i, s := range sessions {
+		if s.ID == current.ID {
+			current = s
+			sessions = append(sessions[:i], sessions[i+1:]...)
+			break
+		}
 	}
-	m.sessionPicker = &sessionPicker{sessions: sessions}
+	m.sessionPicker = &sessionPicker{sessions: append([]store.SessionSummary{current}, sessions...)}
 	return m, nil
 }
 
@@ -45,6 +51,12 @@ func (m model) handleSessionPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	switch msg.String() {
 	case "esc":
 		m.sessionPicker = nil
+	case "n":
+		m.sessionPicker = nil
+		m.bumpGen()
+		m.busy = true
+		m.state = "new session"
+		return m, newSessionCmd(m.ctx, m.chat)
 	case "up":
 		p.index = max(0, p.index-1)
 		p.err = ""
@@ -54,7 +66,7 @@ func (m model) handleSessionPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	case "enter":
 		chosen := p.sessions[p.index]
 		if chosen.ID == m.chat.Session.ID {
-			p.err = "this is the current session"
+			m.sessionPicker = nil // already here
 			return m, nil
 		}
 		agent, ok := m.sessionAgent(chosen)
@@ -101,7 +113,7 @@ func (m model) handleResumed(msg resumedMsg) (tea.Model, tea.Cmd) {
 	m.state = "ready"
 	if msg.err != nil {
 		m.lead = m.previousLead
-		m.setModal("resume failed", msg.err.Error())
+		m.fail("resume failed", msg.err.Error())
 		return m, m.listen()
 	}
 	m.chat = msg.chat
@@ -114,7 +126,7 @@ func (m model) handleResumed(msg resumedMsg) (tea.Model, tea.Cmd) {
 	m.refreshViewport()
 	m.refreshDashboard()
 	if msg.status.ResumeError != nil {
-		m.setModal("could not resume", msg.agent.Name+" could not reopen that session, so a new one was started.\n\n"+firstLine(msg.status.ResumeError.Error()))
+		m.fail("could not resume", msg.agent.Name+" could not reopen that session, so a new one was started. "+firstLine(msg.status.ResumeError.Error()))
 	}
 	return m, m.listen()
 }
@@ -129,7 +141,10 @@ func (m model) sessionPickerContent(width int) string {
 		}
 		title := strings.Join(strings.Fields(s.Title), " ")
 		if title == "" {
-			title = "(no messages from you)"
+			title = "(no messages yet)"
+		}
+		if m.chat != nil && s.ID == m.chat.Session.ID {
+			title = "current · " + title
 		}
 		meta := fmt.Sprintf("%s · %s · %d msgs", orNone(s.AgentName), ago(s.UpdatedAt), s.Messages)
 		titleWidth := max(10, width-8-len(meta))
@@ -140,6 +155,9 @@ func (m model) sessionPickerContent(width int) string {
 		}
 		b.WriteString(style.Width(max(10, width-4)).Render(truncate(line, width-4)))
 		b.WriteString("\n")
+	}
+	if chosen := p.sessions[p.index]; chosen.ID != "" {
+		b.WriteString("\n" + dimStyle.Render(truncate("from a shell: switch --resume "+chosen.ID, width-4)) + "\n")
 	}
 	if p.err != "" {
 		b.WriteString("\n" + errorStyle.Render(p.err) + "\n")

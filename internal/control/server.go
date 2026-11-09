@@ -49,6 +49,7 @@ type identity struct {
 	agent  string
 	role   string
 	taskID string
+	id     string // the run agent or subagent ID
 }
 
 type Server struct {
@@ -62,10 +63,11 @@ type Server struct {
 	listener net.Listener
 	created  os.FileInfo // the socket file this server made
 
-	mu     sync.Mutex
-	tokens map[string]identity
-	blocks map[string]string // task ID -> reason
-	wg     sync.WaitGroup
+	mu        sync.Mutex
+	subagents Subagents
+	tokens    map[string]identity
+	blocks    map[string]string // task ID -> reason
+	wg        sync.WaitGroup
 }
 
 type Options struct {
@@ -158,7 +160,7 @@ func (s *Server) Grant(agent store.RunAgent, taskID string) (execution.Grant, er
 	}
 	token := hex.EncodeToString(buf)
 	s.mu.Lock()
-	s.tokens[token] = identity{agent: agent.Name, role: agent.Role, taskID: taskID}
+	s.tokens[token] = identity{agent: agent.Name, role: agent.Role, taskID: taskID, id: agent.ID}
 	s.mu.Unlock()
 
 	env := []string{EnvSocket + "=" + s.Path, EnvToken + "=" + token, EnvBin + "=" + s.exe}
@@ -171,6 +173,25 @@ func (s *Server) Grant(agent store.RunAgent, taskID string) (execution.Grant, er
 			Env:     []acp.EnvVariable{{Name: EnvSocket, Value: s.Path}, {Name: EnvToken, Value: token}},
 		}}},
 	}, nil
+}
+
+// Subagents runs the helpers workers start for their tasks; the run engine
+// implements it.
+type Subagents interface {
+	Spawn(parent, taskID string, req execution.SpawnRequest) (store.Subagent, error)
+	Wait(ctx context.Context, parent, taskID string, names []string) ([]store.Subagent, error)
+	Message(parent, taskID, name, text string) (string, error)
+	Stop(parent, taskID, name string) (int, error)
+	List(parent, taskID string) ([]store.Subagent, error)
+	Report(id, text string) error
+	RunningSubagents(taskID string) int
+}
+
+// SetSubagents lets workers start subagents through this server.
+func (s *Server) SetSubagents(subagents Subagents) {
+	s.mu.Lock()
+	s.subagents = subagents
+	s.mu.Unlock()
 }
 
 // TakeBlock returns and clears a block the task's worker reported.
@@ -275,13 +296,17 @@ func (s *Server) runMembers(ctx context.Context, who identity) ([]Member, error)
 func (s *Server) handle(req Request) (any, error) {
 	s.mu.Lock()
 	who, ok := s.tokens[req.Token]
+	subagents := s.subagents
 	s.mu.Unlock()
 	if !ok {
 		return nil, errUnauthorized
 	}
 	timeout := 10 * time.Second
-	if req.Method == "ask" {
+	switch req.Method {
+	case "ask", "wait":
 		timeout = askTimeout
+	case "stop":
+		timeout = time.Minute
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -294,6 +319,11 @@ func (s *Server) handle(req Request) (any, error) {
 		Role    string   `json:"role"`
 		Deps    []string `json:"deps"`
 		Verify  []string `json:"verify"`
+		Name    string   `json:"name"`
+		Names   []string `json:"names"`
+		Files   []string `json:"files"`
+		Driver  string   `json:"driver"`
+		Model   string   `json:"model"`
 	}
 	if len(req.Params) > 0 {
 		if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -346,6 +376,11 @@ func (s *Server) handle(req Request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		if subagents != nil {
+			if n := subagents.RunningSubagents(task.ID); n > 0 {
+				return nil, fmt.Errorf("%d of your subagents are still running; collect them with switch_wait or stop them with switch_stop first", n)
+			}
+		}
 		task.Summary = message
 		if err := s.store.SaveTask(ctx, task); err != nil {
 			return nil, err
@@ -372,11 +407,91 @@ func (s *Server) handle(req Request) (any, error) {
 		}
 		return s.delegate(ctx, who, params.Title, params.Brief, params.Role, params.Deps, params.Verify)
 
+	case "spawn", "wait", "message", "stop", "subagents":
+		return s.handleSubagents(ctx, subagents, who, req.Method, params.Name, params.Names, params.Brief, params.Files, params.Driver, params.Model, message)
+
+	case "report":
+		if who.role != "subagent" {
+			return nil, errors.New("switch_report is for subagents; workers report with switch_complete")
+		}
+		if subagents == nil {
+			return nil, errors.New("no run is active")
+		}
+		if err := subagents.Report(who.id, message); err != nil {
+			return nil, err
+		}
+		return "recorded; end your turn and " + strings.SplitN(who.agent, "/", 2)[0] + " gets your result", nil
+
 	case "approve", "merge":
 		return nil, errors.New("forbidden: only the user approves and merges work")
 
 	default:
 		return nil, fmt.Errorf("unknown method %q", req.Method)
+	}
+}
+
+// subagentView is a subagent as its worker sees it.
+type subagentView struct {
+	Name    string   `json:"name"`
+	Status  string   `json:"status"`
+	Driver  string   `json:"driver"`
+	Files   []string `json:"files,omitempty"`
+	Brief   string   `json:"brief"`
+	Summary string   `json:"result,omitempty"`
+}
+
+func viewSubagents(subs []store.Subagent) []subagentView {
+	views := make([]subagentView, 0, len(subs))
+	for _, sa := range subs {
+		views = append(views, subagentView{Name: sa.Name, Status: sa.Status, Driver: sa.Driver, Files: sa.Files, Brief: sa.Brief, Summary: sa.Summary})
+	}
+	return views
+}
+
+// handleSubagents serves a worker's subagent tools. Only the worker assigned
+// to a running task may use them; the lead and subagents may not.
+func (s *Server) handleSubagents(ctx context.Context, subagents Subagents, who identity, method, name string, names []string, brief string, files []string, driver, model, message string) (any, error) {
+	switch who.role {
+	case "lead":
+		return nil, errors.New("forbidden: the lead runs workers, not subagents; delegate a task instead")
+	case "subagent":
+		return nil, errors.New("forbidden: subagents cannot start or manage subagents")
+	}
+	if subagents == nil {
+		return nil, errors.New("subagents are available during a run, or in the chat while you answer a teammate's question")
+	}
+	// In a run, only the worker assigned to a running task may use them; in
+	// the chat, the team allows a teammate that is answering a question.
+	if s.team == nil {
+		if _, err := s.workerTask(ctx, who); err != nil {
+			return nil, err
+		}
+	}
+	name = strings.TrimSpace(name)
+	switch method {
+	case "spawn":
+		sa, err := subagents.Spawn(who.agent, who.taskID, execution.SpawnRequest{Name: name, Brief: brief, Files: files, Driver: driver, Model: model})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"name": sa.Name, "status": sa.Status, "next": "switch_wait collects its result"}, nil
+	case "wait":
+		subs, err := subagents.Wait(ctx, who.agent, who.taskID, names)
+		return viewSubagents(subs), err
+	case "message":
+		if name == "" {
+			return nil, errors.New("message needs the subagent's name")
+		}
+		return subagents.Message(who.agent, who.taskID, name, message)
+	case "stop":
+		n, err := subagents.Stop(who.agent, who.taskID, name)
+		if err != nil {
+			return nil, err
+		}
+		return fmt.Sprintf("stopped %d", n), nil
+	default:
+		subs, err := subagents.List(who.agent, who.taskID)
+		return viewSubagents(subs), err
 	}
 }
 

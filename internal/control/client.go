@@ -23,7 +23,7 @@ func Call(socket, token, method string, params any) (any, error) {
 	}
 	defer conn.Close()
 	deadline := 30 * time.Second
-	if method == "ask" {
+	if method == "ask" || method == "wait" {
 		deadline = askTimeout + time.Minute
 	}
 	_ = conn.SetDeadline(time.Now().Add(deadline))
@@ -53,7 +53,7 @@ func Call(socket, token, method string, params any) (any, error) {
 // prefer a shell command to MCP tools.
 func RunAgentCLI(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: switch __control agent <whoami|team|task|progress|complete|block> [message]\n       switch __control agent ask <teammate> <message>")
+		fmt.Fprintln(stderr, "usage: switch __control agent <whoami|team|task|progress|complete|block|report> [message]\n       switch __control agent ask <teammate> <message>")
 		return 2
 	}
 	params := map[string]string{"message": strings.Join(args[1:], " ")}

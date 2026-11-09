@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/store"
 )
@@ -13,8 +14,8 @@ import (
 func TestRunWithoutRunExplains(t *testing.T) {
 	next, cmd := model{}.handleSlash("/run")
 	got := next.(model)
-	if cmd != nil || got.job != "" || !strings.Contains(got.modal, "/plan") {
-		t.Fatalf("modal = %q, job = %q; want a /plan hint", got.modal, got.job)
+	if cmd != nil || got.job != "" || !strings.Contains(got.toastText(), "/plan") {
+		t.Fatalf("toast = %q, job = %q; want a /plan hint", got.toastText(), got.job)
 	}
 }
 
@@ -27,8 +28,8 @@ func TestRunJobKeepsChatUsableAndGuardsPlan(t *testing.T) {
 	}
 	next, cmd := m.handleSlash("/plan build it")
 	got := next.(model)
-	if cmd != nil || !strings.Contains(got.modal, "/stop") {
-		t.Fatalf("/plan during a run: modal = %q", got.modal)
+	if cmd != nil || !strings.Contains(got.toastText(), "/stop") {
+		t.Fatalf("/plan during a run: toast = %q", got.toastText())
 	}
 }
 
@@ -85,3 +86,21 @@ type errTest string
 func (e errTest) Error() string { return string(e) }
 
 func keyEnter() tea.KeyPressMsg { return tea.KeyPressMsg{Code: tea.KeyEnter} }
+
+func TestPlanLogShowsTasksNotJSON(t *testing.T) {
+	m := model{ctx: context.Background(), lead: config.Agent{Name: "builder-1"}}
+	m.startJob("plan", "planning", true)
+	defer m.endJob()
+	m.appendJobText("builder-1", "Looking at the repos first.\n[tool] shell (pending)\nThen I will split `go.mod` work.\n```json\n{\"goal\": \"g\", \"tasks\": [\n")
+	m.appendJobText("builder-1", `{"id": "a", "title": "Map the \"repos\"", "files": [".switch/x.md"]}, {"id": "b", "title": "Research portal UI",`)
+	m.appendJobText("builder-1", ` "brief": "read"}, {"id": "c",`)
+	got := m.planProgress(80, 20)
+	for _, want := range []string{"builder-1 is planning", "using shell", "split `go.mod` work", `Map the "repos"`, "Research portal UI", "drafting task 3"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("plan log missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `"files"`) {
+		t.Errorf("plan log shows raw JSON:\n%s", got)
+	}
+}

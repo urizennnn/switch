@@ -24,12 +24,13 @@ var slashCommands = []slashCommand{
 	{Name: "/reject", Args: "<task> <reason>", Description: "send a task back", NeedsArg: true},
 	{Name: "/retry", Args: "<task>", Description: "requeue a blocked task", NeedsArg: true},
 	{Name: "/diff", Args: "<task>", Description: "show a task diff", NeedsArg: true},
+	{Name: "/agent", Args: "<name>", Description: "follow a worker or subagent live; tab cycles, esc goes back", NeedsArg: true},
 	{Name: "/agents", Description: "run agents and usage"},
 	{Name: "/log", Description: "run event log"},
 	{Name: "/doctor", Description: "check setup"},
 	{Name: "/init", Description: "create config"},
 	{Name: "/rules", Description: "edit rule files; /rules <agent> shows what it gets"},
-	{Name: "/session", Description: "show session"},
+	{Name: "/session", Description: "show and switch sessions"},
 	{Name: "/lead", Args: "<agent>", Description: "choose the lead", NeedsArg: true},
 	{Name: "/adapters", Description: "manage ACP adapters"},
 	{Name: "/new", Description: "start a new session"},
@@ -70,7 +71,7 @@ type keyBinding struct {
 
 var keyBindings = []keyBinding{
 	{Keys: "enter", Description: "send"},
-	{Keys: "tab", Description: "complete"},
+	{Keys: "tab", Description: "complete · next agent"},
 	{Keys: "up/down", Description: "select"},
 	{Keys: "esc", Description: "close or cancel"},
 	{Keys: "ctrl+o", Description: "zen mode"},

@@ -59,6 +59,8 @@ type TurnRequest struct {
 	// Ephemeral ends the agent session after the turn; worker sessions stay
 	// resumable for retries.
 	Ephemeral bool
+	// Label describes the turn in live views, such as the task title.
+	Label string
 }
 
 type TurnResult struct {
@@ -87,6 +89,8 @@ type Options struct {
 	Permission   acpdriver.PermissionMode
 	OnPermission func(*acpdriver.PermissionRequest)
 	OnText       func(agent, text string)
+	// OnEvent receives each agent's session events, for live views.
+	OnEvent func(agent string, event acpdriver.Event)
 	// OnChange is called after every task transition.
 	OnChange  func()
 	AgentLogs io.Writer
@@ -117,6 +121,14 @@ type Engine struct {
 
 	mu   sync.Mutex // serializes task transitions and merges
 	wake chan struct{}
+
+	subMu  sync.Mutex
+	subs   map[string]*subagent // by ID, started by this process
+	runCtx context.Context      // the active Run's context; subagents end with it
+
+	stopMu   sync.Mutex
+	turns    map[string]context.CancelFunc // worker name -> its running task turn
+	stopping map[string]bool               // task IDs the user stopped
 }
 
 // New loads the run and prepares an engine for it.
@@ -158,7 +170,8 @@ func New(ctx context.Context, opts Options) (*Engine, error) {
 		// Runs planned before integration_path was stored.
 		run.IntegrationPath = manager.Root(run.ID) + "/integration"
 	}
-	e := &Engine{opts: opts, run: run, manager: manager, wake: make(chan struct{}, 1)}
+	e := &Engine{opts: opts, run: run, manager: manager, wake: make(chan struct{}, 1), subs: map[string]*subagent{},
+		turns: map[string]context.CancelFunc{}, stopping: map[string]bool{}}
 	if e.opts.Turn == nil {
 		e.opts.Turn = e.acpTurn
 	}
@@ -177,6 +190,14 @@ func (e *Engine) Run(ctx context.Context) (string, error) {
 	if err := e.recover(); err != nil {
 		return "", err
 	}
+	e.subMu.Lock()
+	e.runCtx = ctx
+	e.subMu.Unlock()
+	defer func() {
+		e.subMu.Lock()
+		e.runCtx = nil
+		e.subMu.Unlock()
+	}()
 	e.setRunStatus(RunRunning)
 
 	done := make(chan string, e.opts.Config.MaxConcurrency)
@@ -357,6 +378,7 @@ func (e *Engine) recover() error {
 		}
 		e.save(ctx, task, task.Assignee, "recovered after restart")
 	}
+	e.recoverSubagents(ctx)
 	return nil
 }
 

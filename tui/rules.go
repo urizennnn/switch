@@ -122,7 +122,7 @@ func (m model) handleEdited(msg editedMsg) (tea.Model, tea.Cmd) {
 			r.err = "editor: " + msg.err.Error()
 		}
 	} else if msg.err != nil {
-		m.setModal("rules", "editor: "+msg.err.Error())
+		m.fail("editor failed", msg.err.Error())
 	}
 	return m, nil
 }
@@ -197,7 +197,7 @@ func rulesManagerFooter(r *rulesManager) string {
 func (m *model) previewRules(name string) {
 	agent, ok := m.fleetAgent(name)
 	if !ok {
-		m.setModal("rules", fmt.Sprintf("no configured agent named %q", name))
+		m.fail("unknown agent "+name, "/lead lists configured agents")
 		return
 	}
 	role := agent.Role
@@ -207,7 +207,7 @@ func (m *model) previewRules(name string) {
 	set, err := rules.Scoped(m.rules, role, agent.Name, "")
 	switch {
 	case err != nil:
-		m.setModal("rules", err.Error())
+		m.fail("could not read rules", err.Error())
 	case set.Empty():
 		m.setModal("rules for "+name, name+" gets no rules.\n\n/rules opens the rule files.")
 	default:
@@ -256,7 +256,7 @@ func (m model) handleRulesReviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.chat.Rules = m.rules
 		}
 		m.rulesReview = nil
-		m.setModal("rules", "This project's rules will not be sent this session. You will be asked again next time.")
+		m.notify("project rules skipped", "they will not be sent this session; you will be asked again next time")
 	}
 	return m, nil
 }

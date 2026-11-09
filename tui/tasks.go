@@ -144,6 +144,19 @@ func (m model) taskDetail(task store.Task) string {
 	section("feedback for the next attempt", task.Feedback)
 	section("lead review", task.Review)
 	section("worker summary", task.Summary)
+	var subs []string
+	for _, sa := range m.subagents {
+		if sa.TaskID == task.ID {
+			line := fmt.Sprintf("  %-10s %-11s %s", sa.Name, sa.Status, firstLine(sa.Brief))
+			if sa.Summary != "" {
+				line += "\n  " + strings.Repeat(" ", 22) + "→ " + firstLine(sa.Summary)
+			}
+			subs = append(subs, line)
+		}
+	}
+	if len(subs) > 0 {
+		fmt.Fprintf(&b, "\nsubagents\n%s\n", strings.Join(subs, "\n"))
+	}
 	if evidence, err := m.store.Verifications(m.ctx, task.ID); err == nil && len(evidence) > 0 {
 		b.WriteString("\nverification\n")
 		for _, v := range evidence {
@@ -168,6 +181,9 @@ func (m model) taskPickerContent(width int) string {
 		worker := ""
 		if task.Assignee != "" {
 			worker = " · " + task.Assignee
+		}
+		if n := countSubagents(m.subagents, task.ID); n > 0 {
+			worker += fmt.Sprintf(" · %d subagents", n)
 		}
 		line := fmt.Sprintf("%-14s %-11s %s%s", truncate(shortTaskID(task.ID), 14), task.Status, task.Title, worker)
 		style := mutedStyle
@@ -257,9 +273,25 @@ func firstLine(text string) string {
 	return text
 }
 
+// lastLine is the final line of command output, usually its result.
+func lastLine(text string) string {
+	text = strings.TrimSpace(text)
+	return text[strings.LastIndexByte(text, '\n')+1:]
+}
+
 func orNone(value string) string {
 	if value == "" {
 		return "none"
 	}
 	return value
+}
+
+func countSubagents(subs []store.Subagent, taskID string) int {
+	n := 0
+	for _, sa := range subs {
+		if sa.TaskID == taskID {
+			n++
+		}
+	}
+	return n
 }

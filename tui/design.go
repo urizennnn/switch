@@ -19,6 +19,7 @@ var (
 	red        = lipgloss.Color("#ff5f6d")
 	green      = lipgloss.Color("#48e08f")
 	yellow     = lipgloss.Color("#f5c451")
+	violet     = lipgloss.Color("#c792ff") // waiting on the user
 	surface    = lipgloss.Color("#171b22")
 	surfaceAlt = lipgloss.Color("#303847")
 )
@@ -84,16 +85,6 @@ func panel(width, height int, title, content string) string {
 		Width(max(10, width)).
 		Height(max(3, height)).
 		Render(truncateLines(head+strings.TrimRight(content, "\n"), max(1, height-2)))
-}
-
-func appHeader(width int, left, right string) string {
-	rightWidth := lipgloss.Width(right)
-	leftWidth := max(10, width-rightWidth-spaceM)
-	return lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		lipgloss.NewStyle().Width(leftWidth).Render(left),
-		lipgloss.NewStyle().Width(rightWidth).Align(lipgloss.Right).Render(right),
-	)
 }
 
 func inputBar(width int, value string) string {

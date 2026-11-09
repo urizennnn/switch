@@ -176,7 +176,25 @@ func (m *model) bumpGen() {
 	m.listenStop = make(chan struct{})
 }
 
+// Update starts the status line's timer when a turn begins and keeps its
+// clock ticking while anything runs.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.update(msg)
+	nm, ok := next.(model)
+	if !ok {
+		return next, cmd
+	}
+	if nm.busy && !m.busy {
+		nm.turnStarted, nm.step = time.Now(), ""
+	}
+	if nm.timing() && !nm.clockRunning {
+		nm.clockRunning = true
+		cmd = tea.Batch(cmd, clockTick())
+	}
+	return nm, cmd
+}
+
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+c" {
@@ -228,6 +246,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if msg.String() == "ctrl+o" {
 			m.toggleZen()
+			return m, nil
+		}
+
+		if delta := m.scrollKey(msg.String()); delta != 0 {
+			m.scroll(delta)
 			return m, nil
 		}
 
@@ -318,6 +341,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Following a worker or subagent: tab moves between agents, esc goes
+		// back up, and a worker's subagent cards can be opened.
+		switch key := msg.String(); {
+		case key == "ctrl+t":
+			m.showThoughts = !m.showThoughts
+			m.refreshViewport()
+			return m, nil
+		case key == "ctrl+x":
+			return m.stopFocused()
+		case key == "tab" || key == "shift+tab":
+			step := 1
+			if key == "shift+tab" {
+				step = -1
+			}
+			m.cycleFocus(step)
+			return m, nil
+		case m.focus != "" && key == "esc":
+			m.focusUp()
+			return m, nil
+		case m.focus != "" && m.input.Value() == "" && (key == "left" || key == "right" || key == "enter"):
+			if _, isSub := m.focusedSubagent(); !isSub {
+				if subs := m.subagentsOf(m.focus); len(subs) > 0 {
+					switch key {
+					case "left":
+						m.card = max(0, m.card-1)
+					case "right":
+						m.card = min(len(subs)-1, m.card+1)
+					default:
+						m.setFocus(m.focus + "/" + subs[min(m.card, len(subs)-1)].Name)
+					}
+					return m, nil
+				}
+			}
+		}
+
 		switch msg.String() {
 		case "esc":
 			switch {
@@ -349,6 +407,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.Reset()
 			m.paletteOpen = false
 			m.home = false
+			m.setFocus("") // the message goes to the lead, so show its chat
 			m.appendUser(text)
 			if m.chat == nil {
 				// Still connecting: keep the message and send it once the lead is up.
@@ -484,10 +543,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case dashboardTickMsg:
+		m.pruneToasts()
 		if m.job == "" {
 			m.refreshDashboard()
 		}
-		return m, dashboardTick()
+		return m, tea.Batch(dashboardTick(), gitStatusCmd(m.project))
+
+	case clockMsg:
+		m.clockRunning = false // Update rearms it while something runs
+		m.frame++
+		if m.focus == "" && m.busy {
+			m.refreshViewport()
+		}
+		return m, nil
+
+	case streamMsg:
+		return m.handleStream(msg)
+
+	case teamPermissionMsg:
+		m.permission = msg.request
+		m.permissionResume = waitTeamPermission(m.teamPerms)
+		m.state = "permission"
+		return m, nil
+
+	case gitStatusMsg:
+		m.branch, m.dirty = msg.branch, msg.dirty
+		return m, nil
 
 	case detachMsg:
 		m.refreshDashboard()
@@ -509,7 +590,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case planResultMsg:
 		m.endJob()
 		if msg.err != nil {
-			m.setModal("plan failed", msg.err.Error())
+			m.fail("plan failed", msg.err.Error())
 		} else if msg.result != nil {
 			m.setModal("plan", planSummary(msg.result))
 		}
@@ -524,7 +605,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.state = "ready"
 		if msg.err != nil {
-			m.setModal("doctor", msg.err.Error())
+			m.fail("doctor failed", msg.err.Error())
 		} else {
 			m.setModal("doctor", msg.report)
 			if !msg.available {
@@ -537,7 +618,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.state = "ready"
 		if msg.err != nil {
-			m.setModal("new session failed", msg.err.Error())
+			m.fail("new session failed", msg.err.Error())
 			return m, m.listen()
 		}
 		m.chat = msg.chat
@@ -545,16 +626,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loadHistory() // a new session starts with an empty transcript
 		m.refreshViewport()
 		m.refreshDashboard()
-		m.setModal("new session", m.chat.Session.ID)
+		m.notify("new session", shortID(m.chat.Session.ID))
 		return m, m.listen()
 
 	case adapterActionMsg:
 		m.installing = ""
 		if msg.err != nil {
-			m.setModal("adapter", msg.name+" "+msg.action+" failed\n\n"+msg.err.Error()+"\n"+msg.output)
+			m.fail(msg.name+" "+msg.action+" failed", firstLine(msg.err.Error())+"\n"+lastLine(msg.output))
 			return m, nil
 		}
-		m.setModal("adapter", msg.name+" "+msg.action+" complete\n\n"+msg.output)
+		m.notify(msg.name+" "+msg.action+" complete", lastLine(msg.output))
 		if m.chat == nil {
 			return m, nil
 		}
@@ -570,7 +651,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.persistLead(m.previousLead.Name)
 			}
 			m.team.park(msg.agent.Name, msg.adopted)
-			m.setModal("lead switch failed", msg.err.Error())
+			m.fail("lead switch failed", msg.err.Error())
 			return m, m.listen()
 		}
 		m.chat = msg.chat
@@ -585,7 +666,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loadHistory()
 		m.refreshViewport()
 		m.refreshDashboard()
-		m.setModal("lead", fmt.Sprintf("%s is now the lead (%s)", msg.agent.Name, msg.agent.Driver))
+		m.notify(msg.agent.Name+" is now the lead", msg.agent.Driver)
 		return m, m.listen()
 	}
 
@@ -596,14 +677,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // the background; leadChangedMsg reverts on failure.
 func (m model) beginLeadSwitch(agent config.Agent) (tea.Model, tea.Cmd) {
 	if m.chat == nil {
-		m.setModal("lead", m.lead.Name+" is still connecting; switch once it is ready")
+		m.notify("still connecting", m.lead.Name+" is still connecting; switch once it is ready")
 		return m, nil
 	}
 	m.previousLead = m.lead
 	m.lead = agent
 	if err := m.persistLead(agent.Name); err != nil {
 		m.lead = m.previousLead
-		m.setModal("lead", "could not save lead: "+err.Error())
+		m.fail("could not save lead", err.Error())
 		return m, nil
 	}
 	m.bumpGen()
@@ -615,6 +696,7 @@ func (m model) beginLeadSwitch(agent config.Agent) (tea.Model, tea.Cmd) {
 func (m *model) setModal(title, body string) {
 	m.modalTitle = title
 	m.modal = body
+	m.modalTop = 0
 	m.paletteOpen = false
 }
 
@@ -688,40 +770,15 @@ func (m model) handlePaletteEnter() (tea.Model, tea.Cmd) {
 
 func (m model) handleAgentEvent(event acpdriver.Event) (tea.Model, tea.Cmd) {
 	switch event.Type {
-	case acpdriver.EventMessage:
-		m.appendAssistantChunk(event.Text)
-		m.refreshViewport()
-		return m, m.listen()
-
-	case acpdriver.EventThought:
-		return m, m.listen()
-
-	case acpdriver.EventToolCall, acpdriver.EventToolEdit:
-		if event.Tool != nil {
-			m.appendTool(event.Tool.ID, event.Tool.Title, event.Tool.Status)
-			m.refreshViewport()
-		}
-		return m, m.listen()
-
-	case acpdriver.EventPlan:
-		items := make([]string, 0, len(event.Plan))
-		for _, entry := range event.Plan {
-			mark := "·"
-			switch entry.Status {
-			case "completed":
-				mark = "✓"
-			case "in_progress":
-				mark = "›"
-			}
-			items = append(items, mark+" "+entry.Content)
-		}
-		m.setPlan(items)
+	case acpdriver.EventMessage, acpdriver.EventThought, acpdriver.EventToolCall, acpdriver.EventToolEdit, acpdriver.EventPlan:
+		applyEvent(&m.entries, event)
+		m.step = strings.ToLower(activity(m.entries))
 		m.refreshViewport()
 		return m, m.listen()
 
 	case acpdriver.EventUsage:
 		if event.Usage != nil {
-			m.state = fmt.Sprintf("working · %d/%d tokens", event.Usage.Used, event.Usage.Size)
+			m.ctxUsed, m.ctxSize = event.Usage.Used, event.Usage.Size
 		}
 		return m, m.listen()
 
@@ -809,25 +866,25 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	switch command {
 	case "/plan", "/run", "/doctor", "/lead", "/adapters", "/new", "/resume":
 		if m.busy {
-			m.setModal("busy", "wait for the current turn to finish")
+			m.notify("busy", "wait for the current turn to finish")
 			return m, nil
 		}
 	}
 	switch command {
 	case "/session", "/new", "/resume":
 		if m.chat == nil {
-			m.setModal(command[1:], m.lead.Name+" is still connecting; try again in a moment")
+			m.notify("still connecting", m.lead.Name+" is still connecting; try again in a moment")
 			return m, nil
 		}
 	case "/plan", "/run", "/adapters":
 		// Never plan, start a second run, or install adapters mid-run.
 		if m.job == "run" {
-			m.setModal("run in progress", "/stop ends the run first")
+			m.notify("run in progress", "/stop ends the run first")
 			return m, nil
 		}
 	case "/tasks", "/review", "/agents", "/log", "/approve", "/reject", "/retry", "/diff":
 		if m.run == nil {
-			m.setModal("no run", "/plan <goal> or /plan --file <path> creates one")
+			m.notify("no run yet", "/plan <goal> or /plan --file <path> creates one")
 			return m, nil
 		}
 	}
@@ -842,6 +899,9 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.modalTitle = ""
 		m.refreshDashboard()
 
+	case "/agent":
+		m.openAgent(strings.Join(fields[1:], " "))
+
 	case "/rules":
 		if len(fields) > 1 {
 			m.previewRules(fields[1])
@@ -850,21 +910,17 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.openRulesManager()
 
 	case "/session":
-		info := fmt.Sprintf("lead: %s\ndriver: %s\nmodel: %s\nsession: %s (%s)", m.lead.Name, m.chat.Agent, m.chat.Model, m.chat.Session.ID, sessionState(m.status.Resumed))
-		if m.status.ResumeError != nil {
-			info += "\n\nthe previous session could not be resumed:\n" + m.status.ResumeError.Error()
-		}
-		m.setModal("session", info)
+		return m.openSessionPicker()
 
 	case "/plan":
 		if len(fields) < 2 {
-			m.setModal("plan", "usage: /plan <goal>  or  /plan --file <path>")
+			m.notify("usage", "/plan <goal>  or  /plan --file <path>")
 			break
 		}
 		var goal, file string
 		if fields[1] == "--file" {
 			if len(fields) < 3 {
-				m.setModal("plan", "usage: /plan --file <path>")
+				m.notify("usage", "/plan --file <path>")
 				break
 			}
 			file, _ = filepath.Abs(fields[2])
@@ -879,7 +935,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 
 	case "/run":
 		if m.run == nil {
-			m.setModal("run", "no run yet\n\n/plan <goal> or /plan --file <path> first")
+			m.notify("no run yet", "/plan <goal> or /plan --file <path> first")
 			break
 		}
 		if m.runOwner > 0 {
@@ -897,7 +953,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		engine, server, err := m.startRun(ctx)
 		if err != nil {
 			m.endJob()
-			m.setModal("run failed", err.Error())
+			m.fail("run failed", err.Error())
 			break
 		}
 		m.engine = engine
@@ -912,7 +968,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		case m.runOwner > 0 && m.run != nil:
 			return m, stopDetachedCmd(m.run.ID)
 		default:
-			m.setModal("stop", "no run in progress")
+			m.notify("nothing to stop", "no run in progress")
 		}
 
 	case "/tasks", "/review":
@@ -940,24 +996,24 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 
 	case "/approve", "/retry", "/diff":
 		if len(fields) < 2 {
-			m.setModal(command[1:], "usage: "+command+" <task>")
+			m.notify("usage", command+" <task>")
 			break
 		}
 		task, ok := m.findTask(fields[1])
 		if !ok {
-			m.setModal(command[1:], "unknown task "+fields[1]+"\n/tasks lists them")
+			m.fail("unknown task "+fields[1], "/tasks lists them")
 			break
 		}
 		return m, m.taskAction(command[1:], task.ID, "")
 
 	case "/reject":
 		if len(fields) < 2 {
-			m.setModal("reject", "usage: /reject <task> <reason>")
+			m.notify("usage", "/reject <task> <reason>")
 			break
 		}
 		task, ok := m.findTask(fields[1])
 		if !ok {
-			m.setModal("reject", "unknown task "+fields[1]+"\n/tasks lists them")
+			m.fail("unknown task "+fields[1], "/tasks lists them")
 			break
 		}
 		reason := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(text, "/reject")), fields[1]))
@@ -971,9 +1027,9 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	case "/init":
 		created, err := config.EnsureProject(m.project)
 		if err != nil {
-			m.setModal("init failed", err.Error())
+			m.fail("init failed", err.Error())
 		} else if len(created) == 0 {
-			m.setModal("init", "project is already initialized")
+			m.notify("already initialized", "")
 		} else {
 			m.setModal("init", "created:\n  "+strings.Join(created, "\n  "))
 			m.refreshDashboard()
@@ -987,18 +1043,18 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		agent, ok := m.fleetAgent(fields[1])
 		switch {
 		case !ok:
-			m.setModal("lead", "unknown agent "+fields[1]+"\n\nuse /lead to list configured agents")
+			m.fail("unknown agent "+fields[1], "/lead lists configured agents")
 		case !adapterAvailable(agent.Driver):
-			m.setModal("lead", agent.Name+" uses unavailable adapter "+agent.Driver)
+			m.fail(agent.Name+" is unavailable", "its adapter "+agent.Driver+" is not installed; /adapters installs it")
 		case agent.Name == m.lead.Name:
-			m.setModal("lead", agent.Name+" is already the lead")
+			m.notify(agent.Name+" is already the lead", "")
 		default:
 			return m.beginLeadSwitch(agent)
 		}
 
 	case "/adapters":
 		if m.installing != "" {
-			m.setModal("adapters", m.installing+" is still running; wait for it to finish")
+			m.notify("install running", m.installing+" is still running; wait for it to finish")
 			break
 		}
 		m.adapterPicker = buildAdapterPicker()
@@ -1016,7 +1072,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.setModal("help", helpText())
 
 	default:
-		m.setModal("unknown command", command+"\ntry /help")
+		m.fail("unknown command "+command, "/help lists commands")
 	}
 
 	return m, nil

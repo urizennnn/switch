@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/urizennnn/switch/internal/execution"
 	"github.com/urizennnn/switch/internal/store"
 )
 
@@ -257,5 +259,74 @@ func TestTeamMode(t *testing.T) {
 	}
 	if _, err := Call(server.Path, token, "ask", map[string]string{"message": "no recipient"}); err == nil {
 		t.Fatal("ask without a teammate succeeded")
+	}
+}
+
+type fakeSubagents struct {
+	running  int
+	spawned  []string
+	reported string
+}
+
+func (f *fakeSubagents) Spawn(parent, taskID string, req execution.SpawnRequest) (store.Subagent, error) {
+	f.spawned = append(f.spawned, parent+"/"+req.Name)
+	f.running++
+	return store.Subagent{Name: req.Name, Status: "running"}, nil
+}
+func (f *fakeSubagents) Wait(context.Context, string, string, []string) ([]store.Subagent, error) {
+	f.running = 0
+	return []store.Subagent{{Name: "scout", Status: "done", Summary: "found it"}}, nil
+}
+func (f *fakeSubagents) Message(string, string, string, string) (string, error) { return "sent", nil }
+func (f *fakeSubagents) Stop(string, string, string) (int, error)               { return 0, nil }
+func (f *fakeSubagents) List(string, string) ([]store.Subagent, error)          { return nil, nil }
+func (f *fakeSubagents) Report(id, text string) error                           { f.reported = id + ": " + text; return nil }
+func (f *fakeSubagents) RunningSubagents(string) int                            { return f.running }
+
+func TestSubagentTools(t *testing.T) {
+	server, _, tokens := setup(t)
+	call := func(who, method string, params any) (any, error) {
+		return Call(server.Path, tokens[who], method, params)
+	}
+	if _, err := call("builder-1", "spawn", map[string]string{"name": "scout", "brief": "b"}); err == nil || !strings.Contains(err.Error(), "available during a run") {
+		t.Fatalf("spawn without a run: %v", err)
+	}
+	subs := &fakeSubagents{}
+	server.SetSubagents(subs)
+	grant, _ := server.Grant(store.RunAgent{ID: "run:a/scout", Name: "builder-1/scout", Role: "subagent"}, "run:a")
+	for _, env := range grant.Env {
+		if value, ok := strings.CutPrefix(env, EnvToken+"="); ok {
+			tokens["scout"] = value
+		}
+	}
+
+	for _, forbidden := range []struct{ who, method string }{
+		{"lead", "spawn"},     // the lead runs workers, not subagents
+		{"scout", "spawn"},    // one level only
+		{"scout", "wait"},     // nor manage siblings
+		{"intruder", "spawn"}, // not this agent's task
+	} {
+		if _, err := call(forbidden.who, forbidden.method, map[string]string{"name": "x", "brief": "b"}); err == nil || !strings.Contains(err.Error(), "forbidden") {
+			t.Errorf("%s %s: err = %v, want forbidden", forbidden.who, forbidden.method, err)
+		}
+	}
+	if _, err := call("builder-1", "spawn", map[string]string{"name": "scout", "brief": "find callers"}); err != nil || len(subs.spawned) != 1 || subs.spawned[0] != "builder-1/scout" {
+		t.Fatalf("spawn = %v %v", subs.spawned, err)
+	}
+	if _, err := call("builder-1", "complete", map[string]string{"message": "done"}); err == nil || !strings.Contains(err.Error(), "still running") {
+		t.Fatalf("complete with a running subagent: %v", err)
+	}
+	if _, err := call("scout", "report", map[string]string{"message": "3 callers"}); err != nil || subs.reported != "run:a/scout: 3 callers" {
+		t.Fatalf("report = %q, %v", subs.reported, err)
+	}
+	if _, err := call("builder-1", "report", map[string]string{"message": "x"}); err == nil {
+		t.Fatal("a worker used switch_report")
+	}
+	got, err := call("builder-1", "wait", nil)
+	if err != nil || !strings.Contains(fmt.Sprint(got), "found it") {
+		t.Fatalf("wait = %v, %v", got, err)
+	}
+	if _, err := call("builder-1", "complete", map[string]string{"message": "done"}); err != nil {
+		t.Fatalf("complete after wait: %v", err)
 	}
 }

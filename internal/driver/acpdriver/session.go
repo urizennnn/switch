@@ -51,6 +51,9 @@ const (
 	EventTurn     EventType = "turn"
 	EventError    EventType = "error"
 	EventExit     EventType = "exit"
+	// EventStart is never sent by an adapter: Switch emits it to live views
+	// when it starts a turn, with a short description of the turn in Text.
+	EventStart EventType = "start"
 )
 
 type Event struct {
@@ -70,6 +73,8 @@ type ToolInfo struct {
 	Title  string
 	Status string
 	Kind   string
+	Detail string // what it acts on: a command, path, pattern, or teammate
+	Output string // text or file diff supplied by the adapter
 }
 
 type PlanEntry struct {
@@ -95,9 +100,11 @@ type PermissionOption struct {
 }
 
 type PermissionRequest struct {
+	Agent      string // who is asking, when the caller sets it
 	SessionID  string
 	ToolCallID string
 	Title      string
+	Kind       string // read, edit, execute, …; empty when the agent did not say
 	Options    []PermissionOption
 
 	response chan PermissionDecision
@@ -149,6 +156,8 @@ type Session struct {
 	ephemeral   bool
 	exitMu      sync.Mutex
 	exitErr     error
+	kindMu      sync.Mutex
+	kinds       map[string]string // tool call ID -> kind, for permission requests
 }
 
 // Open starts an adapter, initializes ACP, and creates or resumes a session.
@@ -329,15 +338,22 @@ func (s *Session) Close(ctx context.Context) error {
 		if s.stdin != nil {
 			_ = s.stdin.Close()
 		}
+		// Adapters get a moment to exit on EOF, then SIGTERM, then SIGKILL;
+		// some never exit on EOF, and quitting Switch should not wait on them.
 		if s.cmd != nil && s.cmd.Process != nil {
 			select {
 			case <-s.waitCh:
-			case <-time.After(2 * time.Second):
-				s.cancel()
+			case <-time.After(300 * time.Millisecond):
+				_ = terminateGroup(s.cmd.Process.Pid)
 				select {
 				case <-s.waitCh:
-				case <-time.After(2 * time.Second):
-					_ = s.cmd.Process.Kill()
+				case <-time.After(time.Second):
+					s.cancel()
+					select {
+					case <-s.waitCh:
+					case <-time.After(time.Second):
+						_ = s.cmd.Process.Kill()
+					}
 				}
 			}
 		}
@@ -366,6 +382,14 @@ func (s *Session) ExitError() error {
 func (s *Session) emit(event Event) {
 	if event.SessionID == "" {
 		event.SessionID = s.ID
+	}
+	if event.Tool != nil && event.Tool.Kind != "" {
+		s.kindMu.Lock()
+		if s.kinds == nil {
+			s.kinds = map[string]string{}
+		}
+		s.kinds[event.Tool.ID] = event.Tool.Kind
+		s.kindMu.Unlock()
 	}
 	select {
 	case s.events <- event:
@@ -406,6 +430,16 @@ func (c *sessionClient) RequestPermission(ctx context.Context, params acp.Reques
 		ToolCallID: string(params.ToolCall.ToolCallId),
 		Title:      title,
 		response:   make(chan PermissionDecision, 1),
+	}
+	if params.ToolCall.Kind != nil {
+		request.Kind = string(*params.ToolCall.Kind)
+	} else {
+		c.session.kindMu.Lock()
+		request.Kind = c.session.kinds[request.ToolCallID]
+		c.session.kindMu.Unlock()
+	}
+	if detail := toolDetail(params.ToolCall.RawInput, params.ToolCall.Locations); detail != "" && detail != title {
+		request.Title = title + " " + detail
 	}
 	for _, option := range params.Options {
 		request.Options = append(request.Options, PermissionOption{
@@ -490,6 +524,8 @@ func normalizeUpdate(params acp.SessionNotification) (Event, bool) {
 			Title:  u.ToolCall.Title,
 			Status: string(u.ToolCall.Status),
 			Kind:   string(u.ToolCall.Kind),
+			Detail: toolDetail(u.ToolCall.RawInput, u.ToolCall.Locations),
+			Output: toolOutput(u.ToolCall.Content),
 		}
 	case u.ToolCallUpdate != nil:
 		event.Type = EventToolEdit
@@ -500,6 +536,11 @@ func normalizeUpdate(params acp.SessionNotification) (Event, bool) {
 		if u.ToolCallUpdate.Status != nil {
 			tool.Status = string(*u.ToolCallUpdate.Status)
 		}
+		if u.ToolCallUpdate.Kind != nil {
+			tool.Kind = string(*u.ToolCallUpdate.Kind)
+		}
+		tool.Detail = toolDetail(u.ToolCallUpdate.RawInput, u.ToolCallUpdate.Locations)
+		tool.Output = toolOutput(u.ToolCallUpdate.Content)
 		event.Tool = tool
 	case u.Plan != nil:
 		event.Type = EventPlan

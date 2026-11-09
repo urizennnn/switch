@@ -27,6 +27,7 @@ type Options struct {
 	Fleet   []config.Agent
 	Lead    config.Agent
 	Run     config.RunConfig
+	Resume  string // a session to reopen instead of starting a new one
 }
 
 type model struct {
@@ -67,12 +68,21 @@ type model struct {
 	jobChanges       chan struct{}
 	jobLog           string
 	jobPartial       map[string]string
+	jobStarted       time.Time
+	planText         string // the lead's raw plan output, shown as progress
+	turnStarted      time.Time
+	step             string // what the lead is doing in this turn
+	ctxUsed, ctxSize int    // the lead's context window, when the adapter reports it
+	clockRunning     bool
+	branch           string
+	dirty            int // uncommitted files
 	permissionResume tea.Cmd
 	engine           *execution.Engine
 	runConfig        config.RunConfig
 	taskPicker       *taskPicker
 	sessionPicker    *sessionPicker
 	rulesManager     *rulesManager
+	toasts           []toast
 	rulesReview      *rulesReview
 	rulesDeclined    bool   // project rules left out this session
 	zen              bool   // sidebar hidden
@@ -84,7 +94,20 @@ type model struct {
 	adapterPicker    *adapterPicker
 	run              *store.Run
 	tasks            []store.Task
+	subagents        []store.Subagent
 	runAgents        []store.RunAgent
+	focus            string               // the agent the main pane follows; "" is the lead's chat
+	card             int                  // the selected subagent card in a worker's view
+	agentEntries     map[string][]entry   // each other agent's transcript this session
+	agentBusy        map[string]time.Time // agents mid-turn, since when
+	chatSubs         []store.Subagent     // subagents of teammates in the chat
+	streams          chan streamMsg       // events from workers, teammates and subagents
+	teamPerms        chan *acpdriver.PermissionRequest
+	frame            int    // animation frame
+	modalTop         int    // first line shown in a reading panel
+	agentTop         int    // first line shown in an agent view; -1 follows the end
+	showThoughts     bool   // ctrl+t
+	resume           string // session to reopen on connect
 	palette          []slashCommand
 	paletteIndex     int
 	paletteOpen      bool
@@ -121,9 +144,15 @@ func New(opts Options) model {
 		height:     24,
 		state:      "connecting",
 		connecting: true,
-		home:       true, // usable at once; the lead connects in the background
+		agentTop:   -1,
+		resume:     opts.Resume,
+		home:       opts.Resume == "", // a reopened session shows its conversation
 	}
+	m.streams = make(chan streamMsg, 512)
+	m.teamPerms = make(chan *acpdriver.PermissionRequest)
+	m.agentEntries, m.agentBusy = map[string][]entry{}, map[string]time.Time{}
 	m.team = newTeam(m.project, m.dashboardFleet(), m.lead.Name)
+	m.team.ctx, m.team.events, m.team.perms, m.team.subCfg = ctx, m.streams, m.teamPerms, opts.Run.Subagents
 	m.listenStop = make(chan struct{})
 	m.reviewRules()
 	m.layout()
@@ -132,7 +161,8 @@ func New(opts Options) model {
 
 // Init renders the shell immediately and connects the lead in the background.
 func (m model) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, m.connectCmd(), dashboardTick())
+	return tea.Batch(textinput.Blink, m.connectCmd(), dashboardTick(), gitStatusCmd(m.project),
+		waitStream(m.streams), waitTeamPermission(m.teamPerms))
 }
 
 type dashboardTickMsg struct{}
@@ -205,11 +235,13 @@ func (m *model) refreshDashboard() {
 	if err != nil || !ok {
 		m.run = nil
 		m.tasks = nil
+		m.subagents = nil
 		m.runAgents = nil
 		return
 	}
 	m.run = &run
 	m.tasks, _ = m.store.TasksForRun(m.ctx, run.ID)
+	m.subagents, _ = m.store.SubagentsForRun(m.ctx, run.ID)
 	m.runAgents, _ = m.store.RunAgents(m.ctx, run.ID)
 	m.runOwner = 0
 	if m.job != "run" {
@@ -281,17 +313,33 @@ func (m model) connectCmd() tea.Cmd {
 	return func() tea.Msg {
 		t.listen()
 		conversation, status, err := chat.Open(m.ctx, chat.Options{
-			Project: m.project,
-			Name:    m.lead.Name,
-			Agent:   m.lead.Driver,
-			Model:   m.lead.Model,
-			Rules:   m.rules,
-			Store:   m.store,
-			Grant:   t.grant,
-			Context: t.describe,
+			Project:   m.project,
+			Name:      m.lead.Name,
+			Agent:     m.lead.Driver,
+			Model:     m.lead.Model,
+			Rules:     m.rules,
+			Store:     m.store,
+			New:       m.resume == "", // every launch starts fresh unless --resume names a session
+			SessionID: m.resume,
+			Grant:     t.grant,
+			Context:   t.describe,
 		})
 		return connectedMsg{chat: conversation, status: status, err: err}
 	}
+}
+
+// ResumeID is the session to offer reopening after Switch exits: the lead's
+// current session, once it has a conversation.
+func (m model) ResumeID() string {
+	if m.chat == nil || m.chat.Session == nil {
+		return ""
+	}
+	for _, e := range m.entries {
+		if e.kind == entryUser && e.who == "" {
+			return m.chat.Session.ID
+		}
+	}
+	return ""
 }
 
 func (m *model) shutdown() {

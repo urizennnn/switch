@@ -30,3 +30,8 @@ func processAlive(pid int) bool {
 func killGroup(pid int) error {
 	return syscall.Kill(-pid, syscall.SIGKILL)
 }
+
+// terminateGroup asks the adapter and its children to exit.
+func terminateGroup(pid int) error {
+	return syscall.Kill(-pid, syscall.SIGTERM)
+}

@@ -75,15 +75,33 @@ ln -s "$PWD/scripts/switch" ~/.local/bin/switch
 | `/doctor` | Check config, rules, adapters, and state |
 | `/init` | Create `.switch` config and rules explicitly |
 | `/rules` | Manage rule files; `/rules <agent>` shows what that agent gets |
-| `/session` | Show the current agent session |
+| `/session` | Show this project's sessions, current first: enter switches, n starts a new one |
 | `/lead <agent>` | Choose which configured agent leads and persist it |
 | `/adapters` | Install or uninstall ACP adapters (not during a run) |
 | `/new` | Start a new session with an empty transcript |
-| `/resume` | Pick a past session of this project and continue it with the agent that owned it |
+| `/resume` | Same as `/session`; a past session continues with the agent that owned it |
 | `/zen` | Hide or show the sidebar (also `ctrl+o`) |
 | `/home` | Return to the dashboard |
 | `/help` | Show commands |
 | `/quit` | Exit |
+
+Each launch starts a new session. When you quit, Switch prints the command
+that reopens the one you were in (`switch --resume <id>`, run from the same
+folder).
+
+Use Page Up/Page Down to move through output and Ctrl+Home/Ctrl+End to jump to
+the beginning or latest output. Fenced code in agent replies is highlighted
+and framed; a block still arriving is marked “streaming”.
+
+The mouse wheel scrolls through the terminal's alternate scroll mode, so
+click-and-drag still selects text. Inside tmux with `mouse on`, tmux keeps
+the wheel unless the pane asked for mouse events; send it to full-screen apps
+as arrow keys with:
+
+```tmux
+bind -n WheelUpPane if -F "#{||:#{pane_in_mode},#{mouse_any_flag}}" "send -M" "if -F '#{alternate_on}' 'send -N 3 Up' 'copy-mode -e'"
+bind -n WheelDownPane if -F "#{||:#{pane_in_mode},#{mouse_any_flag}}" "send -M" "if -F '#{alternate_on}' 'send -N 3 Down' ''"
+```
 
 ### How a run works
 
@@ -179,6 +197,38 @@ offered a `switch` MCP server (`switch_task`, `switch_progress`,
 `switch_complete`, `switch_block`, and lead-only `switch_delegate`), and the
 same calls work from a shell as `$SWITCH_BIN __control agent <method> <message>`.
 Only you approve and merge; agents are refused.
+
+### Subagents
+
+The lead runs the workers; each worker can run its own subagents for parts of
+its task (`switch_spawn`, `switch_wait`, `switch_message`, `switch_stop`,
+`switch_subagents`). Subagents work in their worker's worktree, report only to
+it with `switch_report`, and cannot start subagents of their own. A spawn
+names the files the subagent may edit (none means read-only), and siblings
+cannot claim the same files. A worker cannot complete its task while any of
+its subagents runs, and any it leaves running when its turn ends are stopped.
+Subagent turns count toward the run budget.
+
+```toml
+[run.subagents]
+max_per_builder = 3   # running at once per worker (0 = off)
+drivers = ["claude", "codex"]  # adapters workers may start (default: any)
+```
+
+In the chat, a teammate the lead consults with `switch_ask` can also start
+read-only subagents to explore in parallel; they stop when it answers.
+Teammates' reads go ahead, and anything else they or their subagents want to
+do comes to you as a permission prompt naming the agent.
+
+In the TUI, subagents appear under their worker in the sidebar. Tab cycles
+the main pane through the lead, each worker and each subagent (or use
+`/agent <name>`); a worker's view lists its subagents as cards, enter opens
+one, and esc goes back up. Each view streams that agent's thinking, tool
+calls and reply live; ctrl+x stops what it is doing (a stopped worker's task
+is blocked for you to retry), and ctrl+t shows collapsed thinking. Otherwise
+the views are read-only: the worker handles its subagents. Rules for subagents are their worker's rules plus
+`roles/subagent.md`. File claims are instructions; Switch enforces them only
+when the adapter asks permission before editing.
 
 Resume a probe session by passing the session ID printed by a previous run:
 

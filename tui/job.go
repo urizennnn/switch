@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,6 +59,8 @@ func (m *model) startJob(name, state string, holdInput bool) context.Context {
 	m.jobChanges = make(chan struct{}, 1)
 	m.jobLog = ""
 	m.jobPartial = map[string]string{}
+	m.jobStarted = time.Now()
+	m.planText = ""
 	if holdInput {
 		m.busy = true
 		m.state = state
@@ -128,14 +132,18 @@ func (m model) waitJob() tea.Cmd {
 // appendJobText adds streamed text to the log, one prefixed line per agent
 // line, so concurrent workers do not interleave mid-line.
 func (m *model) appendJobText(agent, text string) {
+	if m.job == "plan" && len(m.planText) < maxJobLog*4 {
+		m.planText += text
+	}
 	pending := m.jobPartial[agent] + text
 	lines := strings.Split(pending, "\n")
 	m.jobPartial[agent] = lines[len(lines)-1]
+	label := strings.ReplaceAll(agent, "/", " › ") // a subagent is worker/name
 	for _, line := range lines[:len(lines)-1] {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		m.jobLog += agent + "  " + line + "\n"
+		m.jobLog += label + "  " + line + "\n"
 	}
 	if len(m.jobLog) > maxJobLog {
 		tail := m.jobLog[len(m.jobLog)-maxJobLog/2:]
@@ -148,7 +156,7 @@ func (m model) jobLogText() string {
 	text := m.jobLog
 	for agent, partial := range m.jobPartial {
 		if strings.TrimSpace(partial) != "" {
-			text += agent + "  " + partial + "\n"
+			text += strings.ReplaceAll(agent, "/", " › ") + "  " + partial + "\n"
 		}
 	}
 	return strings.TrimRight(text, "\n")
@@ -196,6 +204,13 @@ func (m model) newEngine(ctx context.Context, server *control.Server) (*executio
 	}
 	if stream, permissions, changes := m.jobStream, m.jobPermissions, m.jobChanges; stream != nil {
 		opts.OnText = func(agent, text string) { sendText(ctx, stream, agent)(text) }
+		streams := m.streams
+		opts.OnEvent = func(agent string, event acpdriver.Event) {
+			select {
+			case streams <- streamMsg{agent: agent, event: event}:
+			case <-ctx.Done():
+			}
+		}
 		// Workers ask the user, the same as the chat lead.
 		opts.OnPermission = func(request *acpdriver.PermissionRequest) {
 			select {
@@ -238,6 +253,7 @@ func (m model) startRun(ctx context.Context) (*execution.Engine, *control.Server
 		server.Close()
 		return nil, nil, err
 	}
+	server.SetSubagents(engine)
 	return engine, server, nil
 }
 
@@ -283,4 +299,64 @@ func stopDetachedCmd(runID string) tea.Cmd {
 		}
 		return detachMsg{title: "run stopped", body: "the background run stopped; running tasks were interrupted.\n/run resumes them."}
 	}
+}
+
+var (
+	planTitle = regexp.MustCompile(`"title"\s*:\s*"((?:[^"\\]|\\.)*)"`)
+	planTask  = regexp.MustCompile(`"id"\s*:`)
+	planStart = regexp.MustCompile("```|\\{\\s*\"(goal|tasks)\"")
+	planTool  = regexp.MustCompile(`^\[tool\] (.+?)(?: \((\w+)\))?$`)
+)
+
+// planProgress shows the lead's plan as it is written: its thinking, then
+// each task title, instead of the raw JSON it streams.
+func (m model) planProgress(width, height int) string {
+	text := m.planText
+	inner := max(10, width-4)
+	header := activeStyle.Render(m.lead.Name+" is planning") + dimStyle.Render(" · "+time.Since(m.jobStarted).Round(time.Second).String())
+
+	var lines []string
+	start := -1 // where the plan JSON or its code fence begins
+	if loc := planStart.FindStringIndex(text); loc != nil {
+		start = loc[0]
+	}
+	prose := text
+	if start >= 0 {
+		prose = text[:start]
+	}
+	var thoughts []string
+	for _, line := range strings.Split(prose, "\n") {
+		line = strings.TrimSpace(line)
+		if tool := planTool.FindStringSubmatch(line); tool != nil {
+			line = "using " + tool[1] // tool calls read as a step, not a log line
+		}
+		if line != "" {
+			thoughts = append(thoughts, line)
+		}
+	}
+	for _, line := range thoughts[max(0, len(thoughts)-2):] {
+		lines = append(lines, mutedStyle.Render(truncate(line, inner)))
+	}
+
+	titles := planTitle.FindAllStringSubmatch(text, -1)
+	for _, match := range titles {
+		title, err := strconv.Unquote(`"` + match[1] + `"`)
+		if err != nil {
+			title = match[1]
+		}
+		lines = append(lines, successStyle.Render("✓ ")+textStyle.Render(truncate(title, inner-2)))
+	}
+	switch {
+	case start < 0 && text == "":
+		lines = append(lines, dimStyle.Render("reading the project…"))
+	case start >= 0 && len(planTask.FindAllStringIndex(text, -1)) > len(titles):
+		lines = append(lines, dimStyle.Render(fmt.Sprintf("… drafting task %d", len(titles)+1)))
+	case start >= 0:
+		lines = append(lines, dimStyle.Render(fmt.Sprintf("… %d tasks so far", len(titles))))
+	}
+	room := max(1, height-4)
+	if len(lines) > room {
+		lines = append([]string{dimStyle.Render(fmt.Sprintf("  %d more above", len(lines)-room+1))}, lines[len(lines)-room+1:]...)
+	}
+	return header + "\n" + strings.Join(lines, "\n")
 }
