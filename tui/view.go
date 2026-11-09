@@ -199,6 +199,8 @@ func (m model) sidebarContent(width int) string {
 
 	b.WriteString("\n")
 	b.WriteString(section("run"))
+	b.WriteString(dimStyle.Render("mode: " + string(m.permissionMode)))
+	b.WriteString("\n")
 	if m.run == nil {
 		b.WriteString(mutedStyle.Render("no run yet"))
 		b.WriteString("\n")

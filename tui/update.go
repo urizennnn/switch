@@ -15,6 +15,7 @@ import (
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/execution"
 	"github.com/urizennnn/switch/internal/planning"
+	"github.com/urizennnn/switch/internal/policy"
 )
 
 type agentEventMsg struct {
@@ -84,8 +85,11 @@ func waitForActivity(session *acpdriver.Session, gen int, stop <-chan struct{}) 
 	}
 }
 
-func sendPrompt(ctx context.Context, conversation *chat.Chat, text string) tea.Cmd {
+func sendPrompt(ctx context.Context, conversation *chat.Chat, text string, mode policy.Mode) tea.Cmd {
 	return func() tea.Msg {
+		if mode == policy.Plan {
+			text = "[Switch plan mode: investigate and plan only. Do not edit files, run mutating commands, or change external state.]\n\n" + text
+		}
 		_, err := conversation.Send(ctx, text)
 		return turnResultMsg{err: err}
 	}
@@ -437,7 +441,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = true
 			m.state = "working"
 			m.refreshViewport()
-			return m, sendPrompt(m.ctx, m.chat, text)
+			return m, sendPrompt(m.ctx, m.chat, text, m.permissionMode)
 		}
 
 		var cmd tea.Cmd
@@ -489,7 +493,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = true
 			m.state = "working"
 			m.refreshViewport()
-			return m, tea.Batch(append(m.warmCmds(), m.listen(), sendPrompt(m.ctx, m.chat, text))...)
+			return m, tea.Batch(append(m.warmCmds(), m.listen(), sendPrompt(m.ctx, m.chat, text, m.permissionMode))...)
 		}
 		m.refreshViewport()
 		// The lead is up; start the rest of the team in the background.
@@ -508,12 +512,18 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.gen != m.gen {
 			return m, nil
 		}
+		if m.resolvePolicy(msg.request) {
+			return m, m.listen()
+		}
 		m.permission = msg.request
 		m.permissionResume = m.listen()
 		m.state = "permission"
 		return m, nil
 
 	case jobPermissionMsg:
+		if !(m.permissionMode == policy.Full && strings.Contains(msg.request.Agent, "/")) && m.resolvePolicy(msg.request) {
+			return m, m.waitJob()
+		}
 		m.permission = msg.request
 		m.permissionResume = m.waitJob()
 		m.state = "permission"
@@ -580,6 +590,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleStream(msg)
 
 	case teamPermissionMsg:
+		if m.permissionMode != policy.Full && m.resolvePolicy(msg.request) {
+			return m, waitTeamPermission(m.teamPerms)
+		}
 		m.permission = msg.request
 		m.permissionResume = waitTeamPermission(m.teamPerms)
 		m.state = "permission"
@@ -908,6 +921,42 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		}
 	}
 	switch command {
+	case "/mode":
+		if len(fields) == 1 {
+			m.setModal("permission mode", fmt.Sprintf("Current: %s\n\n/mode build — allow reported reads; ask for other operations\n/mode plan — allow reported reads; deny other operations\n/mode full — automatically allow reported requests for this session\n\nThese policies apply only when an adapter requests permission; they are not a sandbox. Task merges always require your approval. Detached runs use their own --allow setting.", m.permissionMode))
+			break
+		}
+		mode, ok := policy.Parse(fields[1])
+		if !ok || len(fields) != 2 {
+			m.notify("usage", "/mode build | plan | full")
+			break
+		}
+		if m.busy || m.job != "" || len(m.agentBusy) != 0 || m.runOwner != 0 {
+			m.notify("work in progress", "stop or finish active work before changing mode")
+			break
+		}
+		m.permissionMode = mode
+		if mode == policy.Full {
+			m.notify("full mode enabled", "reported tool requests are automatically allowed this session; merge approval still applies")
+		} else {
+			m.notify("permission mode: "+string(mode), "applies to adapter permission requests in this session")
+		}
+	case "/parallel":
+		if len(fields) == 1 {
+			m.notify("foreground workers", fmt.Sprintf("maximum %d · /parallel <count> to change for this session", m.runConfig.MaxConcurrency))
+			break
+		}
+		n, err := strconv.Atoi(fields[1])
+		if err != nil || n < 1 || n > 32 || len(fields) != 2 {
+			m.notify("usage", "/parallel <count> (1–32)")
+			break
+		}
+		if m.job != "" || m.runOwner != 0 {
+			m.notify("run in progress", "stop or finish it before changing concurrency")
+			break
+		}
+		m.runConfig.MaxConcurrency = n
+		m.notify("foreground worker limit", fmt.Sprintf("up to %d tasks at once; subagents have a separate limit", n))
 	case "/quit", "/exit":
 		m.shutdown()
 		return m, tea.Quit
@@ -953,6 +1002,10 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		)
 
 	case "/run":
+		if m.permissionMode == policy.Plan {
+			m.notify("plan mode", "choose /mode build or /mode full before running workers")
+			break
+		}
 		if m.run == nil {
 			m.notify("no run yet", "/plan <goal> or /plan --file <path> first")
 			break

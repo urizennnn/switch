@@ -17,6 +17,8 @@ var slashCommands = []slashCommand{
 	{Name: "/plan --file", Args: "<path>", Description: "import plan JSON", NeedsArg: true},
 	{Name: "/run", Description: "start or resume the run"},
 	{Name: "/run --detach", Args: "[--allow]", Description: "run in the background"},
+	{Name: "/mode", Args: "[build|plan|full]", Description: "show or set permission mode for this session"},
+	{Name: "/parallel", Args: "[count]", Description: "show or set foreground worker concurrency"},
 	{Name: "/stop", Description: "stop the run"},
 	{Name: "/tasks", Description: "tasks: details, approve, reject, diff"},
 	{Name: "/review", Description: "tasks waiting for approval"},

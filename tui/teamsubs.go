@@ -84,7 +84,7 @@ func (m model) stopFocused() (tea.Model, tea.Cmd) {
 }
 
 // readOnlyKinds are tool kinds a teammate may use without asking the user.
-var readOnlyKinds = map[string]bool{"read": true, "search": true, "think": true, "fetch": true}
+var readOnlyKinds = map[string]bool{"read": true, "search": true}
 
 func (t *team) emit(agent string, event acpdriver.Event) {
 	if t.events == nil {

@@ -113,8 +113,16 @@ func (p *PermissionRequest) Resolve(mode PermissionMode) {
 		prefix = "reject"
 	}
 	if prefix != "" {
+		// Prefer one-shot choices. An adapter's persistent allow option must
+		// never silently outlive Switch's selected policy.
 		for _, option := range p.Options {
-			if strings.HasPrefix(option.Kind, prefix) {
+			if option.Kind == prefix+"_once" {
+				p.Respond(option.ID)
+				return
+			}
+		}
+		for _, option := range p.Options {
+			if strings.HasPrefix(option.Kind, prefix) && !strings.HasSuffix(option.Kind, "_always") {
 				p.Respond(option.ID)
 				return
 			}

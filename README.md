@@ -62,6 +62,8 @@ ln -s "$PWD/scripts/switch" ~/.local/bin/switch
 | `/plan <goal>` | Ask the lead to plan and create a run |
 | `/plan --file <path>` | Import a plan JSON file |
 | `/run` | Start or resume the run; workers stream into the run log |
+| `/mode [build\|plan\|full]` | Show or change the current session's tool-request policy |
+| `/parallel [count]` | Show or set the foreground run's simultaneous worker-task limit |
 | `/run --detach [--allow]` | Run in a background process that outlives the TUI; worker permissions are deny (or allow) |
 | `/stop` | Stop the run; running tasks become `interrupted` and `/run` resumes them |
 | `/tasks` | Task list: enter for details, `a` approve, `r` reject, `d` diff, `t` retry |
@@ -120,6 +122,31 @@ use your terminal's selection modifier (often Shift) to select text.
 
 Chat with the lead stays available during a run. Run settings live under
 `[run]` in `.switch/config.toml`.
+
+### Permission modes and parallelism
+
+Switch controls the requests an ACP adapter sends; it is not a sandbox and
+cannot intercept operations the adapter performs without asking. Modes apply
+to this interactive session and reset to `build` when Switch restarts:
+
+- `build`: allow reported reads and searches; ask about other requests.
+- `plan`: allow reported reads and searches, deny other requests, and prevent
+  starting worker runs. Use this to explore and plan; it cannot enforce
+  read-only behavior against an adapter that does not ask permission.
+- `full`: automatically allow reported tool requests. Select explicitly with
+  `/mode full`; it applies for the rest of this session until changed. Read-only
+  chat teammates and subagent requests still ask before non-read operations.
+
+Automatic decisions select one-shot options only. They never grant a
+persistent adapter approval. User approval is still required to merge each
+task. Detached/headless runs retain their separate `--permission` or `--allow`
+setting, because they cannot present an interactive prompt.
+
+`/parallel 4` changes the foreground run's maximum concurrent worker tasks for
+the current session; it does not add agents. The number able to run is also
+limited by configured workers and task dependencies. It does not affect a
+detached run or the separate `[run.subagents] max_per_builder` limit. Change
+the project configuration for persistent limits.
 
 ### Rules
 

@@ -14,6 +14,7 @@ import (
 	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/execution"
+	"github.com/urizennnn/switch/internal/policy"
 	"github.com/urizennnn/switch/internal/rules"
 	"github.com/urizennnn/switch/internal/store"
 )
@@ -79,6 +80,7 @@ type model struct {
 	permissionResume tea.Cmd
 	engine           *execution.Engine
 	runConfig        config.RunConfig
+	permissionMode   policy.Mode
 	taskPicker       *taskPicker
 	sessionPicker    *sessionPicker
 	rulesManager     *rulesManager
@@ -132,24 +134,25 @@ func New(opts Options) model {
 	viewportModel.SoftWrap = false
 
 	m := model{
-		ctx:        ctx,
-		cancel:     cancel,
-		project:    opts.Project,
-		rules:      opts.Rules,
-		store:      opts.Store,
-		created:    opts.Created,
-		fleet:      opts.Fleet,
-		lead:       opts.Lead,
-		runConfig:  opts.Run,
-		input:      input,
-		viewport:   viewportModel,
-		width:      80,
-		height:     24,
-		state:      "connecting",
-		connecting: true,
-		agentTop:   -1,
-		resume:     opts.Resume,
-		home:       opts.Resume == "", // a reopened session shows its conversation
+		ctx:            ctx,
+		cancel:         cancel,
+		project:        opts.Project,
+		rules:          opts.Rules,
+		store:          opts.Store,
+		created:        opts.Created,
+		fleet:          opts.Fleet,
+		lead:           opts.Lead,
+		runConfig:      opts.Run,
+		permissionMode: policy.Build,
+		input:          input,
+		viewport:       viewportModel,
+		width:          80,
+		height:         24,
+		state:          "connecting",
+		connecting:     true,
+		agentTop:       -1,
+		resume:         opts.Resume,
+		home:           opts.Resume == "", // a reopened session shows its conversation
 	}
 	m.streams = make(chan streamMsg, 512)
 	m.teamPerms = make(chan *acpdriver.PermissionRequest)
