@@ -46,6 +46,27 @@ func TestToolOutputAppearsInTranscript(t *testing.T) {
 	}
 }
 
+func TestRunningToolCachesOutputAndRefreshesOnChange(t *testing.T) {
+	var entries []entry
+	addTool(&entries, acpdriver.ToolInfo{ID: "t", Title: "Read", Status: "in_progress", Output: "first"})
+	renderEntries(entries, 60, "lead", 0, false)
+	cached := entries[0].outputRendered
+	if cached == "" {
+		t.Fatal("tool output was not cached")
+	}
+	renderEntries(entries, 60, "lead", 1, false)
+	if entries[0].outputRendered != cached {
+		t.Fatal("spinner invalidated unchanged output")
+	}
+	addTool(&entries, acpdriver.ToolInfo{ID: "t", Output: "second"})
+	if entries[0].outputRendered != "" {
+		t.Fatal("updated output left stale cache")
+	}
+	if got := ansi.Strip(renderEntries(entries, 60, "lead", 2, false)); !strings.Contains(got, "second") || strings.Contains(got, "first") {
+		t.Fatalf("unexpected updated output: %s", got)
+	}
+}
+
 func TestTranscriptToolsPlanAndMarkdown(t *testing.T) {
 	m := model{viewport: viewport.New(viewport.WithWidth(60), viewport.WithHeight(20))}
 	m.appendUser("make it so")

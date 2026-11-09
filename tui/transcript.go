@@ -39,11 +39,13 @@ type entry struct {
 	open bool   // reply or thought still streaming
 
 	// tool calls
-	id     string // tool call ID, so status updates replace the line
-	name   string // its first title, such as "shell" or "Read"
-	detail string // what it acts on, such as the command
-	status string
-	output string
+	id             string // tool call ID, so status updates replace the line
+	name           string // its first title, such as "shell" or "Read"
+	detail         string // what it acts on, such as the command
+	status         string
+	output         string
+	outputRendered string
+	outputWidth    int
 
 	start, end time.Time // thinking time
 
@@ -114,8 +116,9 @@ func addTool(list *[]entry, tool acpdriver.ToolInfo) {
 		if tool.Status != "" {
 			e.status = tool.Status
 		}
-		if tool.Output != "" {
+		if tool.Output != "" && tool.Output != e.output {
 			e.output = tool.Output
+			e.outputRendered = ""
 		}
 		if tool.Detail != "" {
 			e.detail = tool.Detail
@@ -288,6 +291,14 @@ func renderEntries(entries []entry, width int, label string, frame int, showThou
 	labelled := false // the agent label is shown once per turn
 	for i := range entries {
 		e := &entries[i]
+		if e.kind == entryTool && e.output != "" && (e.outputRendered == "" || e.outputWidth != width) {
+			language := "text"
+			if strings.HasPrefix(e.output, "File: ") {
+				language = "diff"
+			}
+			e.outputRendered = renderCodeBlock(language, e.output, width, true)
+			e.outputWidth = width
+		}
 		continued := false
 		switch e.kind {
 		case entryUser:
@@ -379,11 +390,15 @@ func renderTool(e entry, width, frame int) string {
 	}
 	result := "  " + mark + " " + head
 	if e.output != "" {
-		language := "text"
-		if strings.HasPrefix(e.output, "File: ") {
-			language = "diff"
+		output := e.outputRendered
+		if output == "" || e.outputWidth != width {
+			language := "text"
+			if strings.HasPrefix(e.output, "File: ") {
+				language = "diff"
+			}
+			output = renderCodeBlock(language, e.output, width, true)
 		}
-		result += "\n" + renderCodeBlock(language, e.output, width, true)
+		result += "\n" + output
 	}
 	return result
 }
