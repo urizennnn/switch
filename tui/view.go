@@ -20,6 +20,7 @@ func (m model) View() tea.View {
 	}
 	v := tea.NewView(m.withToasts(m.screen(), width))
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }
 

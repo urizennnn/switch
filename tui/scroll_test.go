@@ -41,6 +41,17 @@ func TestScrollConversationAgentViewAndPanels(t *testing.T) {
 	if screen := ansi.Strip(m.screen()); !strings.Contains(screen, "line 80") || strings.Contains(screen, "LINES BELOW") {
 		t.Fatalf("conversation does not start at the end")
 	}
+	if m.View().MouseMode != tea.MouseModeCellMotion {
+		t.Fatal("mouse wheel reporting is not enabled")
+	}
+	update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if m.viewport.AtBottom() {
+		t.Fatal("mouse wheel up did not scroll the transcript")
+	}
+	update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if !m.viewport.AtBottom() {
+		t.Fatal("mouse wheel down did not return to the end")
+	}
 	wheel(tea.KeyUp)
 	update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 	if screen := ansi.Strip(m.screen()); strings.Contains(screen, "line 80") || !strings.Contains(screen, "LINES BELOW") {

@@ -93,15 +93,9 @@ Use Page Up/Page Down to move through output and Ctrl+Home/Ctrl+End to jump to
 the beginning or latest output. Fenced code in agent replies is highlighted
 and framed; a block still arriving is marked “streaming”.
 
-The mouse wheel scrolls through the terminal's alternate scroll mode, so
-click-and-drag still selects text. Inside tmux with `mouse on`, tmux keeps
-the wheel unless the pane asked for mouse events; send it to full-screen apps
-as arrow keys with:
-
-```tmux
-bind -n WheelUpPane if -F "#{||:#{pane_in_mode},#{mouse_any_flag}}" "send -M" "if -F '#{alternate_on}' 'send -N 3 Up' 'copy-mode -e'"
-bind -n WheelDownPane if -F "#{||:#{pane_in_mode},#{mouse_any_flag}}" "send -M" "if -F '#{alternate_on}' 'send -N 3 Down' ''"
-```
+The mouse wheel scrolls the conversation, agent view, or open reading panel,
+including inside tmux with mouse mode enabled. When mouse reporting is active,
+use your terminal's selection modifier (often Shift) to select text.
 
 ### How a run works
 

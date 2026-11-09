@@ -140,12 +140,6 @@ func runTUI(resume string) error {
 		Run:     cfg.Run,
 		Resume:  resume,
 	}))
-	// Alternate scroll mode makes the terminal send the mouse wheel as ↑/↓ in
-	// the alternate screen, so the TUI scrolls without capturing the mouse
-	// and click-and-drag still selects text. The terminal's own setting is
-	// saved first and restored on exit.
-	fmt.Print("\x1b[?1007s\x1b[?1007h")
-	defer fmt.Print("\x1b[?1007r")
 	final, err := program.Run()
 	if m, ok := final.(interface{ ResumeID() string }); ok && err == nil {
 		if id := m.ResumeID(); id != "" {

@@ -196,6 +196,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.MouseWheelMsg:
+		if m.permission != nil || m.paletteOpen || m.taskPicker != nil || m.sessionPicker != nil || m.picker != nil || m.adapterPicker != nil || m.rulesManager != nil {
+			return m, nil
+		}
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			m.scroll(-3)
+		case tea.MouseWheelDown:
+			m.scroll(3)
+		}
+		return m, nil
 	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+c" {
 			m.shutdown()
