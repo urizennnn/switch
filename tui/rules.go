@@ -32,7 +32,8 @@ type rulesManager struct {
 // rulesReview shows a project's rules the first time they would be sent, since
 // they come from the repository rather than from the user.
 type rulesReview struct {
-	text string
+	text   string
+	warned bool // an enter came with a message typed, so it was not taken as yes
 }
 
 type editedMsg struct{ err error }
@@ -245,8 +246,16 @@ func (m *model) trustProjectRules() {
 }
 
 func (m model) handleRulesReviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// The panel opens at launch, so keys typed before the user sees it go to
+	// the input, and the enter ending such a message does not accept rules
+	// the user has not read.
 	switch msg.String() {
 	case "enter":
+		if m.input.Value() != "" && !m.rulesReview.warned {
+			m.rulesReview.warned = true
+			m.notify("your message is kept", "read the project rules first: enter uses them, esc skips them")
+			return m, nil
+		}
 		m.trustProjectRules()
 		m.rulesReview = nil
 	case "esc":
@@ -257,6 +266,10 @@ func (m model) handleRulesReviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.rulesReview = nil
 		m.notify("project rules skipped", "they will not be sent this session; you will be asked again next time")
+	default:
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
 	}
 	return m, nil
 }
