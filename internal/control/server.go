@@ -175,8 +175,9 @@ func (s *Server) Grant(agent store.RunAgent, taskID string) (execution.Grant, er
 	}, nil
 }
 
-// Subagents runs the helpers workers start for their tasks; the run engine
-// implements it.
+// Subagents runs the helpers workers start for their tasks and hands work on
+// when an agent runs out of room: the run engine implements it in a run, the
+// team in the chat.
 type Subagents interface {
 	Spawn(parent, taskID string, req execution.SpawnRequest) (store.Subagent, error)
 	Wait(ctx context.Context, parent, taskID string, names []string) ([]store.Subagent, error)
@@ -185,6 +186,8 @@ type Subagents interface {
 	List(parent, taskID string) ([]store.Subagent, error)
 	Report(id, text string) error
 	RunningSubagents(taskID string) int
+	Handoff(from, taskID, to, note string) (string, error)
+	Limits(agent string) execution.Limits
 }
 
 // SetSubagents lets workers start subagents through this server.
@@ -293,7 +296,38 @@ func (s *Server) runMembers(ctx context.Context, who identity) ([]Member, error)
 	return members, nil
 }
 
+// handle answers a request. An agent near its context limit gets a reminder
+// to hand off with every text result, since Switch cannot interrupt its turn.
 func (s *Server) handle(req Request) (any, error) {
+	result, err := s.answer(req)
+	if text, ok := result.(string); ok && err == nil && req.Method != "handoff" {
+		if note := s.limitWarning(req.Token); note != "" {
+			result = text + "\n\n" + note
+		}
+	}
+	return result, err
+}
+
+func (s *Server) limitWarning(token string) string {
+	s.mu.Lock()
+	who, ok := s.tokens[token]
+	host := s.subagents
+	s.mu.Unlock()
+	if !ok || host == nil || who.role == "subagent" {
+		return ""
+	}
+	limits := host.Limits(who.agent)
+	if !limits.Near() {
+		return ""
+	}
+	to := limits.HandoffTo
+	if to == "" {
+		to = "a teammate"
+	}
+	return fmt.Sprintf("[Switch] Your context is %d%% full. Hand off before you run out: call switch_handoff with a note (what is done, what is left) so %s can continue.", limits.Percent(), to)
+}
+
+func (s *Server) answer(req Request) (any, error) {
 	s.mu.Lock()
 	who, ok := s.tokens[req.Token]
 	subagents := s.subagents
@@ -421,6 +455,28 @@ func (s *Server) handle(req Request) (any, error) {
 			return nil, err
 		}
 		return "recorded; end your turn and " + strings.SplitN(who.agent, "/", 2)[0] + " gets your result", nil
+
+	case "limits":
+		if subagents == nil {
+			return nil, errors.New("limits are known only in the chat or during a run")
+		}
+		limits := subagents.Limits(who.agent)
+		out := map[string]any{"handoff_at_percent": limits.HandoffAt, "handoff_to": limits.HandoffTo}
+		if p := limits.Percent(); p >= 0 {
+			out["context_percent"], out["context_used"], out["context_size"] = p, limits.Used, limits.Size
+		} else {
+			out["context_percent"] = "unknown: your adapter has not reported context use"
+		}
+		return out, nil
+
+	case "handoff":
+		if who.role == "subagent" {
+			return nil, errors.New("subagents report to their worker with switch_report; they do not hand off")
+		}
+		if subagents == nil {
+			return nil, errors.New("handoffs happen in the chat or during a run")
+		}
+		return subagents.Handoff(who.agent, who.taskID, params.To, message)
 
 	case "approve", "merge":
 		return nil, errors.New("forbidden: only the user approves and merges work")

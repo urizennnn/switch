@@ -53,7 +53,7 @@ func Call(socket, token, method string, params any) (any, error) {
 // prefer a shell command to MCP tools.
 func RunAgentCLI(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: switch __control agent <whoami|team|task|progress|complete|block|report> [message]\n       switch __control agent ask <teammate> <message>")
+		fmt.Fprintln(stderr, "usage: switch __control agent <whoami|team|task|limits|progress|complete|block|report|handoff> [message]\n       switch __control agent ask <teammate> <message>")
 		return 2
 	}
 	params := map[string]string{"message": strings.Join(args[1:], " ")}

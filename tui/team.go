@@ -43,6 +43,10 @@ type team struct {
 	events chan<- streamMsg                    // live views of teammates and their subagents
 	perms  chan<- *acpdriver.PermissionRequest // actions that need the user's answer
 	subCfg config.SubagentConfig
+
+	usage     map[string]acpdriver.UsageInfo // context use by agent
+	handoffAt int                            // percent of context at which to hand off
+	handoffs  chan<- handoffMsg              // the lead's handoffs, for the TUI to carry out
 }
 
 func newTeam(project string, fleet []config.Agent, lead string) *team {
@@ -50,6 +54,7 @@ func newTeam(project string, fleet []config.Agent, lead string) *team {
 		project: project, fleet: fleet, lead: lead,
 		warm: map[string]*acpdriver.Session{}, warming: map[string]bool{}, asked: map[string]bool{},
 		active: map[string]*acpdriver.Session{}, subs: map[string]*chatSub{}, ctx: context.Background(),
+		usage: map[string]acpdriver.UsageInfo{},
 	}
 }
 
@@ -307,9 +312,28 @@ func (t *team) describe(name string) string {
 	}
 	tools := "the switch_team and switch_ask tools"
 	if t.server == nil {
-		return fmt.Sprintf("[Switch] You are %s, the lead of a Switch team. Teammates: %s.", name, strings.Join(mates, "; "))
+		return fmt.Sprintf("[Switch] You are %s, the lead of a Switch team. Teammates: %s.", name, strings.Join(mates, "; ")) + t.limitNote(name)
 	}
 	return fmt.Sprintf("[Switch] You are %s, the lead of a Switch team. Teammates: %s. "+
 		"These are your team, not your own subagents: consult one with %s (or `$SWITCH_BIN __control agent ask <name> <message>`). "+
-		"The user starts team work with /plan and /run.", name, strings.Join(mates, "; "), tools)
+		"The user starts team work with /plan and /run.", name, strings.Join(mates, "; "), tools) + t.limitNote(name)
+}
+
+// limitNote tells the lead how full its context is, and to hand off once it
+// passes the threshold.
+func (t *team) limitNote(name string) string {
+	limits := t.Limits(name)
+	if limits.Percent() < 0 {
+		return ""
+	}
+	note := fmt.Sprintf(" Your context window is %d%% full.", limits.Percent())
+	if limits.Near() {
+		to := limits.HandoffTo
+		if to == "" {
+			to = "a teammate you name"
+		}
+		note += fmt.Sprintf(" That is past the %d%% handoff point: answer this message, then call switch_handoff with a note "+
+			"(what the user wants, what is done, what is left) so %s takes over as lead.", limits.HandoffAt, to)
+	}
+	return note
 }

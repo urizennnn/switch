@@ -96,7 +96,7 @@ func (f *fixture) engine(cfg config.RunConfig) *Engine {
 		StateDir: filepath.Dir(filepath.Dir(f.run.IntegrationPath)),
 		Rules:    rules.Set{},
 		Turn: func(ctx context.Context, req TurnRequest) (TurnResult, error) {
-			if req.Agent.Role == "lead" {
+			if strings.HasPrefix(req.Label, "review ") {
 				return TurnResult{Output: f.review(req)}, nil
 			}
 			f.prompts.Store(req.TaskID, req.Prompt)

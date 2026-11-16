@@ -18,7 +18,7 @@ import (
 // lead review. It ends at review (waiting for the user), back in the queue
 // with feedback, blocked, or interrupted.
 func (e *Engine) process(ctx context.Context, task store.Task, agent store.RunAgent) {
-	err := e.work(ctx, &task, agent)
+	stopReason, err := e.work(ctx, &task, agent)
 	// The worker handles its subagents; whatever it left running must not
 	// keep editing the worktree while it is verified and committed.
 	if n, _ := e.Stop(agent.Name, task.ID, ""); n > 0 {
@@ -33,6 +33,13 @@ func (e *Engine) process(ctx context.Context, task store.Task, agent store.RunAg
 	e.stopMu.Unlock()
 	if stopped {
 		e.finish(task, agent, StatusBlocked, "stopped by you; /retry runs it again")
+		return
+	}
+	if h, ok := e.takeHandoff(task.ID); ok {
+		e.handOff(task, agent, h)
+		return
+	}
+	if e.limitHandoff(task, agent, stopReason, err) {
 		return
 	}
 	if err != nil {
@@ -84,10 +91,10 @@ func (e *Engine) process(ctx context.Context, task store.Task, agent store.RunAg
 }
 
 // work runs the worker turn and records its session and usage.
-func (e *Engine) work(ctx context.Context, task *store.Task, agent store.RunAgent) error {
+func (e *Engine) work(ctx context.Context, task *store.Task, agent store.RunAgent) (string, error) {
 	scoped, err := rules.Scoped(e.opts.Rules, agent.Role, agent.Name, planID(task.ID))
 	if err != nil {
-		return err
+		return "", err
 	}
 	turnCtx, cancel := context.WithTimeout(ctx, time.Duration(e.opts.Config.TurnTimeout)*time.Second)
 	defer cancel()
@@ -105,7 +112,7 @@ func (e *Engine) work(ctx context.Context, task *store.Task, agent store.RunAgen
 		TaskID:     task.ID,
 		Cwd:        task.Worktree,
 		SessionID:  task.SessionID,
-		Prompt:     WorkerPrompt(*task, agent, scoped) + subagentNote(e.opts.Config.Subagents.MaxPerBuilder),
+		Prompt:     WorkerPrompt(*task, agent, scoped) + subagentNote(e.opts.Config.Subagents.MaxPerBuilder) + handoffNote(e.Limits(agent.Name)),
 		Permission: e.opts.Permission,
 		Ask:        e.opts.OnPermission != nil,
 	})
@@ -117,7 +124,7 @@ func (e *Engine) work(ctx context.Context, task *store.Task, agent store.RunAgen
 		task.Summary = text
 	}
 	e.update(*task, agent.Name, "")
-	return err
+	return result.StopReason, err
 }
 
 type verdict int

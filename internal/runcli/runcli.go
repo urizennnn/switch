@@ -83,7 +83,7 @@ func run(command string, args []string, f flags) error {
 		}
 		runID = latest.ID
 	}
-	opts := execution.Options{Store: state, RunID: runID, Rules: ruleSet, Config: cfg.Run}
+	opts := execution.Options{Store: state, RunID: runID, Rules: ruleSet, Config: cfg.Run, Handoffs: config.Handoffs(cfg.Fleet())}
 
 	taskArg := func() (string, error) {
 		if len(args) == 0 {

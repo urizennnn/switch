@@ -217,9 +217,40 @@ the TUI:
 
 Agents reach the run through the control plane: every agent session is
 offered a `switch` MCP server (`switch_task`, `switch_progress`,
-`switch_complete`, `switch_block`, and lead-only `switch_delegate`), and the
+`switch_complete`, `switch_block`, `switch_limits`, `switch_handoff`, and
+lead-only `switch_delegate`), and the
 same calls work from a shell as `$SWITCH_BIN __control agent <method> <message>`.
 Only you approve and merge; agents are refused.
+
+### Limits and handoffs
+
+Agents know how full their context window is when their adapter reports it:
+the lead sees it on every message, workers through `switch_limits`, and both
+are reminded on every Switch tool result once they pass `handoff_at` (80% by
+default). Near the limit an agent calls `switch_handoff` with a note: what is
+done, what is left, and where it was.
+
+- **A worker** hands its task to another agent, which continues in the same
+  worktree from the note. The lead can take a task too.
+- **The lead** in the chat passes the lead role once its reply ends; the new
+  lead gets the note and carries on.
+- **When a limit stops an agent first** (a usage, rate or context error, or
+  the model's token limit), Switch hands off for it with a note saying why,
+  plus the user's last message for the lead.
+
+Each agent hands off to its `handoff` agent, or to the lead when it has none
+(a lead without one falls back to a standby lead). An agent may also name
+another. Every handoff of a task counts as an attempt, so `max_attempts`
+stops agents passing it back and forth.
+
+```toml
+[run]
+handoff_at = 80        # % of context at which agents are told to hand off (0 = never)
+
+[[agents]]
+name = "builder-1"
+handoff = "builder-2"  # who continues builder-1's work
+```
 
 ### Subagents
 

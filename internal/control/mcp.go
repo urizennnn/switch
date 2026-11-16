@@ -97,6 +97,17 @@ var tools = []tool{
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}}},
 	{Name: "switch_report", method: "report", Description: "Subagents only: give your result to the worker that started you, then end your turn.",
 		InputSchema: messageSchema("your result: what you found or changed")},
+	{Name: "switch_limits", method: "limits", Description: "Show how full your context window is, the share at which you should hand off, and who you hand off to.",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}}},
+	{Name: "switch_handoff", method: "handoff", Description: "Hand your work to another agent before you run out of context or hit a usage limit. In a run, your task continues with that agent in the same worktree; in the chat, the lead role passes to them. End your turn after calling it.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"message": map[string]any{"type": "string", "description": "the handoff note: what is done, what is left, where you were, and anything the next agent must know"},
+				"to":      map[string]any{"type": "string", "description": "the agent to hand off to; defaults to your configured handoff (the lead when none)"},
+			},
+			"required": []string{"message"},
+		}},
 	{Name: "switch_delegate", method: "delegate", Description: "Lead only: add a task to the run.",
 		InputSchema: map[string]any{
 			"type": "object",

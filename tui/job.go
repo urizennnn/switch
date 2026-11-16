@@ -197,6 +197,7 @@ func (m model) newEngine(ctx context.Context, server *control.Server) (*executio
 		RunID:         m.run.ID,
 		Rules:         m.rules,
 		Config:        m.runConfig,
+		Handoffs:      config.Handoffs(m.dashboardFleet()),
 		WaitForReview: true,
 	}
 	if server != nil {

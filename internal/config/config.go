@@ -29,6 +29,9 @@ type RunConfig struct {
 	TurnTimeout int `toml:"turn_timeout"`
 	MaxTurns    int `toml:"max_turns"`
 	MaxTokens   int `toml:"max_tokens"`
+	// HandoffAt is the share of its context window, in percent, at which an
+	// agent is told to hand off; 0 never warns.
+	HandoffAt int `toml:"handoff_at"`
 	// Subagents bounds the helpers a worker may start for its task.
 	Subagents SubagentConfig `toml:"subagents"`
 }
@@ -43,6 +46,9 @@ type Agent struct {
 	Role   string `toml:"role"`
 	Driver string `toml:"driver"`
 	Model  string `toml:"model"`
+	// Handoff is the agent that continues this one's work when it runs out
+	// of context or hits a usage limit.
+	Handoff string `toml:"handoff"`
 }
 
 type RulesConfig struct {
@@ -72,6 +78,7 @@ func Defaults(projectDir string) Config {
 			VerifyTimeout:  600,
 			TurnTimeout:    1800,
 			MaxTurns:       50,
+			HandoffAt:      80,
 			Subagents:      SubagentConfig{MaxPerBuilder: 3},
 		},
 	}
@@ -191,8 +198,26 @@ func (c *Config) normalizeFleet() error {
 		if agent.Model == "" && agent.Driver == c.Agent {
 			agent.Model = c.Model
 		}
+		agent.Handoff = strings.TrimSpace(agent.Handoff)
+	}
+	for _, agent := range c.Agents {
+		if agent.Handoff == agent.Name || (agent.Handoff != "" && !seen[agent.Handoff]) {
+			return fmt.Errorf("agent %q: handoff %q must be another configured agent", agent.Name, agent.Handoff)
+		}
 	}
 	return nil
+}
+
+// Handoffs maps each agent to the one that continues its work; agents
+// without a handoff are left out.
+func Handoffs(fleet []Agent) map[string]string {
+	targets := map[string]string{}
+	for _, agent := range fleet {
+		if agent.Handoff != "" {
+			targets[agent.Name] = agent.Handoff
+		}
+	}
+	return targets
 }
 
 // EnsureProject creates the project config and a starter rules file.
@@ -226,6 +251,7 @@ verify_timeout = 600  # seconds per verification command
 turn_timeout = 1800   # seconds per worker or review turn
 max_turns = 50        # worker turns per run (0 = unlimited)
 max_tokens = 0        # tokens per run (0 = unlimited)
+handoff_at = 80       # % of its context at which an agent is told to hand off (0 = never)
 
 [run.subagents]
 max_per_builder = 3   # helpers each worker may run at once (0 = off)
@@ -241,6 +267,7 @@ model = "opencode/deepseek-v4.1-flash-free"
 name = "builder-1"
 role = "builder"
 driver = "claude"
+handoff = "builder-2" # continues builder-1's work when it runs out (default: the lead)
 
 [[agents]]
 name = "builder-2"

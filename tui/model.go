@@ -111,6 +111,9 @@ type model struct {
 	showThoughts     bool   // ctrl+t
 	showCommands     bool   // ctrl+e
 	resume           string // session to reopen on connect
+	handoffs         chan handoffMsg
+	pendingHandoff   *handoffMsg // starts when the lead's turn ends
+	handoff          *handoffMsg // delivered to the new lead once it connects
 	palette          []slashCommand
 	paletteIndex     int
 	paletteOpen      bool
@@ -159,6 +162,8 @@ func New(opts Options) model {
 	m.agentEntries, m.agentBusy = map[string][]entry{}, map[string]time.Time{}
 	m.team = newTeam(m.project, m.dashboardFleet(), m.lead.Name)
 	m.team.ctx, m.team.events, m.team.perms, m.team.subCfg = ctx, m.streams, m.teamPerms, opts.Run.Subagents
+	m.handoffs = make(chan handoffMsg, 1)
+	m.team.handoffs, m.team.handoffAt = m.handoffs, opts.Run.HandoffAt
 	m.listenStop = make(chan struct{})
 	m.reviewRules()
 	m.layout()
@@ -168,7 +173,7 @@ func New(opts Options) model {
 // Init renders the shell immediately and connects the lead in the background.
 func (m model) Init() tea.Cmd {
 	return tea.Batch(textinput.Blink, m.connectCmd(), dashboardTick(), gitStatusCmd(m.project),
-		waitStream(m.streams), waitTeamPermission(m.teamPerms))
+		waitStream(m.streams), waitTeamPermission(m.teamPerms), waitHandoff(m.handoffs))
 }
 
 type dashboardTickMsg struct{}

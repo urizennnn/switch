@@ -87,6 +87,9 @@ func (m model) stopFocused() (tea.Model, tea.Cmd) {
 var readOnlyKinds = map[string]bool{"read": true, "search": true}
 
 func (t *team) emit(agent string, event acpdriver.Event) {
+	if event.Type == acpdriver.EventUsage && event.Usage != nil {
+		t.setUsage(agent, *event.Usage)
+	}
 	if t.events == nil {
 		return
 	}

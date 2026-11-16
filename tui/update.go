@@ -535,12 +535,20 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.appendError(msg.err.Error())
 			}
 			m.state = "error"
+			if reason := acpdriver.LimitReason("", msg.err); reason != "" && m.pendingHandoff == nil {
+				m.limitHandoff(reason)
+			}
 		} else if m.state == "working" {
 			m.state = "ready"
 		}
 		m.busy = false
 		m.refreshViewport()
-		return m, nil
+		return m.afterTurn()
+
+	case handoffMsg:
+		m.pendingHandoff = &msg
+		next, cmd := m.afterTurn() // at once when the lead is idle
+		return next, tea.Batch(cmd, waitHandoff(m.handoffs))
 
 	case saveResultMsg:
 		if msg.err != nil {
@@ -683,6 +691,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.persistLead(m.previousLead.Name)
 			}
 			m.team.park(msg.agent.Name, msg.adopted)
+			m.handoff = nil
 			m.fail("lead switch failed", msg.err.Error())
 			return m, m.listen()
 		}
@@ -699,7 +708,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		m.refreshDashboard()
 		m.notify(msg.agent.Name+" is now the lead", msg.agent.Driver)
-		return m, m.listen()
+		m, deliver := m.deliverHandoff()
+		return m, tea.Batch(m.listen(), deliver)
 	}
 
 	return m, nil
@@ -811,6 +821,7 @@ func (m model) handleAgentEvent(event acpdriver.Event) (tea.Model, tea.Cmd) {
 	case acpdriver.EventUsage:
 		if event.Usage != nil {
 			m.ctxUsed, m.ctxSize = event.Usage.Used, event.Usage.Size
+			m.team.setUsage(m.lead.Name, *event.Usage)
 		}
 		return m, m.listen()
 
@@ -818,13 +829,17 @@ func (m model) handleAgentEvent(event acpdriver.Event) (tea.Model, tea.Cmd) {
 		text := m.closeAssistant()
 		m.busy = false
 		m.state = "ready"
+		if reason := acpdriver.LimitReason(event.StopReason, nil); reason != "" && m.pendingHandoff == nil {
+			m.limitHandoff(reason)
+		}
 		m.refreshViewport()
 
 		cmds := []tea.Cmd{m.listen()}
 		if strings.TrimSpace(text) != "" {
 			cmds = append(cmds, saveAssistant(m.ctx, m.chat, text))
 		}
-		return m, tea.Batch(cmds...)
+		next, cmd := m.afterTurn()
+		return next, tea.Batch(append(cmds, cmd)...)
 
 	case acpdriver.EventError:
 		if event.Err != nil {

@@ -20,7 +20,10 @@ func WorkerPrompt(task store.Task, agent store.RunAgent, ruleSet rules.Set) stri
 	writeList(&b, "Files in scope", task.Files)
 	writeList(&b, "Acceptance criteria", task.Acceptance)
 	writeList(&b, "Verification commands (Switch runs these after you finish; run them yourself first)", task.Verify)
-	if task.Feedback != "" {
+	if handoff, ok := strings.CutPrefix(task.Feedback, handoffPrefix); ok {
+		from, note, _ := strings.Cut(handoff, ":\n")
+		fmt.Fprintf(&b, "\nYou are taking over this task from %s, which handed it off. Its changes so far are in this worktree. Its note:\n%s\n", from, note)
+	} else if task.Feedback != "" {
 		fmt.Fprintf(&b, "\nThis is attempt %d. The previous attempt was sent back:\n%s\n", task.Attempts, task.Feedback)
 	}
 	writeRules(&b, ruleSet)

@@ -64,9 +64,10 @@ type TurnRequest struct {
 }
 
 type TurnResult struct {
-	Output    string
-	SessionID string
-	Usage     acpdriver.UsageInfo
+	Output     string
+	SessionID  string
+	Usage      acpdriver.UsageInfo
+	StopReason string // why the turn ended, such as max_tokens
 }
 
 // TurnFunc runs one agent turn. The default starts the agent's ACP adapter.
@@ -91,6 +92,9 @@ type Options struct {
 	OnText       func(agent, text string)
 	// OnEvent receives each agent's session events, for live views.
 	OnEvent func(agent string, event acpdriver.Event)
+	// Handoffs names, per agent, who continues its task when it runs out of
+	// room; agents without one hand off to the run's lead.
+	Handoffs map[string]string
 	// OnChange is called after every task transition.
 	OnChange  func()
 	AgentLogs io.Writer
@@ -127,8 +131,10 @@ type Engine struct {
 	runCtx context.Context      // the active Run's context; subagents end with it
 
 	stopMu   sync.Mutex
-	turns    map[string]context.CancelFunc // worker name -> its running task turn
-	stopping map[string]bool               // task IDs the user stopped
+	turns    map[string]context.CancelFunc  // worker name -> its running task turn
+	stopping map[string]bool                // task IDs the user stopped
+	usage    map[string]acpdriver.UsageInfo // context use by agent, as adapters report it
+	handoffs map[string]handoff             // task ID -> handoff its worker asked for
 }
 
 // New loads the run and prepares an engine for it.
@@ -171,7 +177,8 @@ func New(ctx context.Context, opts Options) (*Engine, error) {
 		run.IntegrationPath = manager.Root(run.ID) + "/integration"
 	}
 	e := &Engine{opts: opts, run: run, manager: manager, wake: make(chan struct{}, 1), subs: map[string]*subagent{},
-		turns: map[string]context.CancelFunc{}, stopping: map[string]bool{}}
+		turns: map[string]context.CancelFunc{}, stopping: map[string]bool{},
+		usage: map[string]acpdriver.UsageInfo{}, handoffs: map[string]handoff{}}
 	if e.opts.Turn == nil {
 		e.opts.Turn = e.acpTurn
 	}
@@ -281,11 +288,17 @@ func Ready(tasks []store.Task, agents []store.RunAgent, busy map[string]bool, li
 		if !depsMerged(task, merged) {
 			continue
 		}
+		// An assigned task goes back to its agent, whatever its role: the worker
+		// that attempted it, or whoever it was handed off to (the lead too).
+		assigned := task.Assignee != "" && hasAgent(agents, task.Assignee)
 		for _, agent := range agents {
-			if agent.Role == "lead" || agent.Role != task.Role || taken[agent.Name] {
+			if taken[agent.Name] {
 				continue
 			}
-			if task.Assignee != "" && task.Assignee != agent.Name && hasAgent(agents, task.Assignee) {
+			if assigned && agent.Name != task.Assignee {
+				continue
+			}
+			if !assigned && (agent.Role == "lead" || agent.Role != task.Role) {
 				continue
 			}
 			taken[agent.Name] = true

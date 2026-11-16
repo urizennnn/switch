@@ -266,6 +266,16 @@ type fakeSubagents struct {
 	running  int
 	spawned  []string
 	reported string
+	handoff  string
+	used     int
+}
+
+func (f *fakeSubagents) Handoff(from, taskID, to, note string) (string, error) {
+	f.handoff = from + "→" + to + ": " + note
+	return "handing off", nil
+}
+func (f *fakeSubagents) Limits(string) execution.Limits {
+	return execution.Limits{Used: f.used, Size: 100, HandoffAt: 80, HandoffTo: "builder-2"}
 }
 
 func (f *fakeSubagents) Spawn(parent, taskID string, req execution.SpawnRequest) (store.Subagent, error) {
@@ -328,5 +338,24 @@ func TestSubagentTools(t *testing.T) {
 	}
 	if _, err := call("builder-1", "complete", map[string]string{"message": "done"}); err != nil {
 		t.Fatalf("complete after wait: %v", err)
+	}
+
+	// Handoffs and limits.
+	if _, err := call("scout", "handoff", map[string]string{"message": "x"}); err == nil {
+		t.Fatal("a subagent handed off")
+	}
+	if _, err := call("builder-1", "handoff", map[string]string{"message": "half done", "to": "lead"}); err != nil || subs.handoff != "builder-1→lead: half done" {
+		t.Fatalf("handoff = %q, %v", subs.handoff, err)
+	}
+	if got, _ := call("builder-1", "progress", map[string]string{"message": "x"}); strings.Contains(fmt.Sprint(got), "switch_handoff") {
+		t.Fatal("warned below the threshold")
+	}
+	subs.used = 85
+	got, _ = call("builder-1", "progress", map[string]string{"message": "x"})
+	if !strings.Contains(fmt.Sprint(got), "85% full") || !strings.Contains(fmt.Sprint(got), "builder-2") {
+		t.Fatalf("no handoff warning past the threshold: %v", got)
+	}
+	if got, err := call("builder-1", "limits", nil); err != nil || got.(map[string]any)["context_percent"] != float64(85) {
+		t.Fatalf("limits = %v, %v", got, err)
 	}
 }

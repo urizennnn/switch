@@ -45,10 +45,20 @@ func (e *Engine) acpTurn(ctx context.Context, req TurnRequest) (TurnResult, erro
 		name := req.Agent.Name
 		opts.OnText = func(text string) { e.opts.OnText(name, text) }
 	}
+	name := req.Agent.Name
 	if e.opts.OnEvent != nil {
-		name := req.Agent.Name
 		e.opts.OnEvent(name, acpdriver.Event{Type: acpdriver.EventStart, Text: req.Label})
-		opts.OnEvent = func(event acpdriver.Event) { e.opts.OnEvent(name, event) }
+	}
+	opts.OnEvent = func(event acpdriver.Event) {
+		switch {
+		case event.Type == acpdriver.EventUsage && event.Usage != nil && event.Usage.Size > 0:
+			e.setUsage(name, *event.Usage)
+		case event.Type == acpdriver.EventTurn:
+			result.StopReason = event.StopReason
+		}
+		if e.opts.OnEvent != nil {
+			e.opts.OnEvent(name, event)
+		}
 	}
 	if req.Ask && e.opts.OnPermission != nil {
 		name := req.Agent.Name
