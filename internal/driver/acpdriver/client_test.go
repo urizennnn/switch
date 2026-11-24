@@ -61,3 +61,19 @@ func TestPermissionAskWithoutTTYDenies(t *testing.T) {
 		t.Fatalf("unexpected outcome: %#v", resp.Outcome)
 	}
 }
+
+// --permission allow or deny answers one request: an adapter's persistent
+// option would outlive the probe.
+func TestPermissionNeverPicksAlways(t *testing.T) {
+	for _, mode := range []PermissionMode{PermissionAllow, PermissionDeny} {
+		request := permissionRequest()
+		request.Options = []acp.PermissionOption{
+			{OptionId: "allow-always", Kind: acp.PermissionOptionKindAllowAlways},
+			{OptionId: "reject-always", Kind: acp.PermissionOptionKindRejectAlways},
+		}
+		resp, err := newProbeClient(io.Discard, strings.NewReader(""), false, false, mode).RequestPermission(context.Background(), request)
+		if err != nil || resp.Outcome.Selected != nil {
+			t.Fatalf("--permission %s with only persistent options: %#v, %v; want cancelled", mode, resp.Outcome, err)
+		}
+	}
+}

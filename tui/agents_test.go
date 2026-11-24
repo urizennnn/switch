@@ -84,3 +84,43 @@ func TestFollowWorkersAndSubagents(t *testing.T) {
 		t.Fatalf("permission status line: %q", line)
 	}
 }
+
+func TestStandbyAndWorkingLeadsCanBeFollowed(t *testing.T) {
+	lead := config.Agent{Name: "lead", Role: "lead", Driver: "opencode"}
+	b1 := config.Agent{Name: "builder-1", Role: "builder", Driver: "claude"}
+	b2 := config.Agent{Name: "builder-2", Role: "builder", Driver: "codex"}
+	// Mid-run, the user made builder-1 the chat lead; it still works its task.
+	m := New(Options{Context: context.Background(), Project: "/p", Lead: b1, Fleet: []config.Agent{lead, b1, b2}})
+	m.tasks = []store.Task{{ID: "r1:a", Status: execution.StatusRunning, Assignee: "builder-1"}}
+	if got := strings.Join(m.agentOrder(), ","); got != ",lead,builder-1,builder-2" {
+		t.Fatalf("tab order = %q", got)
+	}
+	m.openAgent("builder-1")
+	if m.focus != "builder-1" {
+		t.Fatalf("/agent builder-1 focused %q, not its task", m.focus)
+	}
+	m.openAgent("lead")
+	if m.focus != "lead" {
+		t.Fatalf("/agent lead focused %q, not the standby lead", m.focus)
+	}
+	m.tasks = nil
+	if m.openAgent("builder-1"); m.focus != "" {
+		t.Fatalf("/agent on the chat lead with no task focused %q, not its chat", m.focus)
+	}
+	// The run's lead reviews stream under the chat lead's name.
+	next, _ := m.Update(streamMsg{agent: "builder-1", event: acpdriver.Event{Type: acpdriver.EventStart, Text: "review r1:a"}})
+	m = next.(model)
+	if m.openAgent("builder-1"); m.focus != "builder-1" {
+		t.Fatalf("the chat lead's review cannot be followed: focus %q", m.focus)
+	}
+	// Once it ends, the transcript, like one of an ask it answered before it
+	// led, does not list the chat lead again.
+	next, _ = m.Update(streamMsg{agent: "builder-1", event: acpdriver.Event{Type: acpdriver.EventTurn}})
+	m = next.(model)
+	if got := strings.Join(m.agentOrder(), ","); got != ",lead,builder-2" {
+		t.Fatalf("tab order after the review = %q", got)
+	}
+	if m.openAgent("builder-1"); m.focus != "" {
+		t.Fatalf("/agent on the idle chat lead focused %q, not its chat", m.focus)
+	}
+}

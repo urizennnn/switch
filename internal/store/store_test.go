@@ -2,6 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -85,5 +88,64 @@ func TestLeadAgentSetting(t *testing.T) {
 	}
 	if name != "builder-1" {
 		t.Fatalf("lead = %q, want builder-1", name)
+	}
+}
+
+// Several processes open the database at once: the first launch plus a
+// __control command, or runs started from a script. Each Open has its own
+// connection, as a separate process would.
+func TestOpenConcurrently(t *testing.T) {
+	for _, older := range []bool{false, true} {
+		path := filepath.Join(t.TempDir(), "switch.db")
+		if older { // a database from a build before the execution columns
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`PRAGMA journal_mode = WAL; CREATE TABLE runs (id TEXT PRIMARY KEY, project TEXT NOT NULL,
+				goal TEXT NOT NULL, base_ref TEXT NOT NULL, integration_branch TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);`); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+		}
+		errs := make(chan error, 16)
+		for range cap(errs) {
+			go func() {
+				s, err := Open(path)
+				if err == nil {
+					err = s.Close()
+				}
+				errs <- err
+			}()
+		}
+		for range cap(errs) {
+			if err := <-errs; err != nil {
+				t.Errorf("older database %v: %v", older, err)
+			}
+		}
+	}
+}
+
+// The database holds transcripts and plans, so only you can read it, even
+// where an older build or another component created the folder first.
+func TestStateIsPrivate(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "switch.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for file, want := range map[string]os.FileMode{dir: 0o700, path: 0o600} {
+		info, err := os.Stat(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s: mode %o, want %o", file, got, want)
+		}
 	}
 }

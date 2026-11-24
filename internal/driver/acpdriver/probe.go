@@ -53,6 +53,7 @@ type CapabilitiesReport struct {
 	Session     SessionCaps  `json:"session"`
 	MCP         MCPCaps      `json:"mcp"`
 	Prompt      PromptCaps   `json:"prompt"`
+	Steering    bool         `json:"steering"` // Session.Steer works
 	AuthMethods []AuthMethod `json:"authMethods"`
 	SessionID   string       `json:"sessionId,omitempty"`
 	Config      []ConfigInfo `json:"configOptions,omitempty"`
@@ -118,7 +119,7 @@ func Probe(ctx context.Context, opts ProbeOptions) error {
 	if opts.Agent == "" {
 		opts.Agent = "opencode"
 	}
-	opts.Agent = strings.ToLower(strings.TrimSpace(opts.Agent))
+	opts.Agent = DriverName(opts.Agent)
 
 	cwd, err := filepath.Abs(opts.Cwd)
 	if err != nil {
@@ -132,9 +133,9 @@ func Probe(ctx context.Context, opts ProbeOptions) error {
 		return fmt.Errorf("cwd %s is not a directory", cwd)
 	}
 
+	adapter, err := ResolveAdapter(opts.Agent)
 	command := opts.Command
 	if len(command) == 0 {
-		adapter, err := ResolveAdapter(opts.Agent)
 		if err != nil {
 			return err
 		}
@@ -159,9 +160,7 @@ func Probe(ctx context.Context, opts ProbeOptions) error {
 	configureProcess(cmd)
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), "NO_COLOR=1")
-	if opts.Agent == "openclaw" {
-		cmd.Env = append(cmd.Env, "OPENCLAW_HIDE_BANNER=1", "OPENCLAW_SUPPRESS_NOTES=1")
-	}
+	cmd.Env = append(cmd.Env, adapter.Env...)
 	var agentStderr bytes.Buffer
 	if opts.AgentLogs {
 		cmd.Stderr = opts.Stderr
@@ -553,6 +552,10 @@ func buildReport(agent string, command []string, init acp.InitializeResponse) Ca
 			EmbeddedContext: init.AgentCapabilities.PromptCapabilities.EmbeddedContext,
 		},
 	}
+	// The adapters advertise it beside agentCapabilities, not inside.
+	if steering, ok := init.Meta["steering"].(map[string]any); ok {
+		report.Steering, _ = steering["supported"].(bool)
+	}
 	if init.AgentInfo != nil {
 		report.DisplayName = init.AgentInfo.Name
 		if init.AgentInfo.Title != nil {
@@ -621,6 +624,7 @@ func printReport(w io.Writer, report CapabilitiesReport) {
 
 	fmt.Fprintf(w, "mcp:       http=%v sse=%v\n", report.MCP.HTTP, report.MCP.SSE)
 	fmt.Fprintf(w, "prompt:    image=%v embedded=%v\n", report.Prompt.Image, report.Prompt.EmbeddedContext)
+	fmt.Fprintf(w, "steering:  %v\n", report.Steering)
 
 	if len(report.AuthMethods) == 0 {
 		fmt.Fprintln(w, "auth:      none advertised")
@@ -647,7 +651,7 @@ func dumpAgentStderr(opts ProbeOptions, buf *bytes.Buffer) {
 func formatACPError(stage string, err error) error {
 	var requestErr *acp.RequestError
 	if errors.As(err, &requestErr) {
-		message := fmt.Sprintf("%s: ACP error %d: %s", stage, requestErr.Code, requestErr.Message)
+		message := fmt.Sprintf("%s: ACP error %d: %s", stage, requestErr.Code, plain(requestErr.Message))
 		// Adapters put the actual cause in data; "Internal error" alone is useless.
 		if requestErr.Data != nil {
 			if data, jsonErr := json.Marshal(requestErr.Data); jsonErr == nil && string(data) != "null" {

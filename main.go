@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/urizennnn/switch/internal/chatcli"
@@ -72,11 +73,18 @@ func trackAdapters() {
 // automation, and tests until the Unix-socket control plane lands.
 func control(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "internal control: chat, plan, run, tasks, approve, reject, retry, diff, log, agent, mcp, probe, doctor, init, rules")
+		fmt.Fprintln(os.Stderr, "internal control: chat, plan, run, status, stop, tasks, approve, reject, retry, diff, log, summary, prune, agent, mcp, probe, doctor, init, rules")
 		return 2
 	}
+	// SWITCH_TOKEN marks an agent's process: agents may look at the run, and
+	// only the user changes it.
+	// shortcut: an agent can unset it, so this is a speed bump, not a sandbox; enforce it outside the agent's process if agents must be stopped.
+	if slices.Contains([]string{"run", "stop", "plan", "approve", "reject", "retry", "prune"}, args[0]) && os.Getenv(controlplane.EnvToken) != "" {
+		fmt.Fprintf(os.Stderr, "switch: only the user can run `__control %s`; agents are refused\n", args[0])
+		return 1
+	}
 	switch args[0] {
-	case "run", "status", "stop", "tasks", "approve", "reject", "retry", "diff", "log":
+	case "run", "status", "stop", "tasks", "approve", "reject", "retry", "diff", "log", "summary", "prune":
 		return runcli.Run(args[0], args[1:])
 	case "agent":
 		return controlplane.RunAgentCLI(args[1:], os.Stdout, os.Stderr)
@@ -102,10 +110,11 @@ func control(args []string) int {
 
 // runTUI starts the TUI in a new session, or reopens resume.
 func runTUI(resume string) error {
-	project, err := os.Getwd()
+	cwd, err := os.Getwd()
 	if err != nil {
 		return err
 	}
+	project := config.ProjectRoot(cwd)
 
 	cfg, created, err := config.LoadOrInit(project)
 	if err != nil {
@@ -122,6 +131,9 @@ func runTUI(resume string) error {
 	defer state.Close()
 
 	ctx := context.Background()
+	// Project rules reach agents only as the user last accepted them; the TUI
+	// shows them for review when they differ.
+	ruleSet = ruleSet.Trust(func() (string, error) { return state.TrustedRules(ctx, project) })
 	lead := resolveLead(ctx, cfg, state, project)
 	if resume != "" {
 		if lead, err = sessionLead(ctx, cfg, state, project, resume); err != nil {
@@ -160,7 +172,7 @@ func sessionLead(ctx context.Context, cfg config.Config, state *store.Store, pro
 			continue
 		}
 		for _, agent := range cfg.Fleet() {
-			if agent.Name == s.AgentName || (s.AgentName == "" && agent.Driver == s.Driver) {
+			if agent.Name == s.AgentName || (s.AgentName == "" && agent.Driver == acpdriver.DriverName(s.Driver)) {
 				return agent, nil
 			}
 		}
@@ -183,7 +195,7 @@ func resolveLead(ctx context.Context, cfg config.Config, state *store.Store, pro
 	}
 	if stored, ok, _ := state.GetChatSession(ctx, project); ok {
 		for _, agent := range cfg.Fleet() {
-			if agent.Driver == stored.Agent {
+			if agent.Driver == acpdriver.DriverName(stored.Agent) {
 				if stored.Model != "" {
 					agent.Model = stored.Model
 				}
@@ -206,10 +218,10 @@ Usage:
 Inside the TUI, type / to open the command palette:
   /plan <goal>            ask the lead to plan and create a run
   /plan --file <path>     import a plan JSON file
-  /run                    dispatch the next ready task to a worker
+  /run                    start or resume the run: workers take ready tasks
   /doctor                 check config, rules, adapters, and state
   /init                   create .switch config and rules
-  /rules                  show effective rules
+  /rules                  edit rule files; /rules <agent> shows what it gets
   /session                show and pick sessions (also /resume)
   /lead <agent>           choose which configured agent leads
   /adapters               install or uninstall ACP adapters

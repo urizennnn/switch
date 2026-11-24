@@ -8,7 +8,10 @@ script=$(readlink -f "$0")
 repo=$(cd "$(dirname "$script")/.." && pwd)
 bin="$repo/switch"
 
-if [ ! -x "$bin" ] || [ -n "$(find "$repo" -path "$repo/.git" -prune -o \( \( -name '*.go' ! -name '*_test.go' \) -o -name go.mod -o -name go.sum \) -newer "$bin" -print -quit)" ]; then
+# A folder newer than the binary gained or lost a file, such as a deleted .go
+# file. The root folder is left out, since building the binary updates it, and
+# so are dot folders like .git and .switch, which hold no Go packages.
+if [ ! -x "$bin" ] || [ -n "$(find "$repo" -path "$repo/.*" -prune -o \( \( -name '*.go' ! -name '*_test.go' \) -o -name go.mod -o -name go.sum -o \( -type d ! -path "$repo" \) \) -newer "$bin" -print -quit)" ]; then
 	echo "switch: building…" >&2
 	go -C "$repo" build -o "$bin" . || { echo "switch: build failed" >&2; exit 1; }
 fi

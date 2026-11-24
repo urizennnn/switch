@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,6 +28,15 @@ func TestCreateAndRemove(t *testing.T) {
 	manager, err := New(ctx, repo, t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
+	}
+	if manager.Prefix != "" {
+		t.Fatalf("Prefix at the repository root = %q", manager.Prefix)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "packages", "api"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if sub, err := New(ctx, filepath.Join(repo, "packages", "api"), t.TempDir()); err != nil || sub.Prefix != "packages/api/" || sub.Repo != manager.Repo {
+		t.Fatalf("New in a subdirectory = %+v, %v", sub, err)
 	}
 	head, err := manager.Head(ctx)
 	if err != nil {
@@ -55,6 +65,18 @@ func TestCreateAndRemove(t *testing.T) {
 	if gotBranch != "switch/run-1/builder-1" {
 		t.Fatalf("worker branch = %q", gotBranch)
 	}
+	// One left behind, say by a crash before it was recorded, is taken over,
+	// also when git was stopped halfway: still locked and partly checked out.
+	runGit(t, repo, "worktree", "lock", "--reason", "initializing", worker.Path)
+	if err := os.Remove(filepath.Join(worker.Path, "README.md")); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := manager.Create(ctx, "run-1", "builder-1", head); err != nil || again != worker {
+		t.Fatalf("Create again = %+v, %v; want %+v", again, err, worker)
+	}
+	if _, err := os.Stat(filepath.Join(worker.Path, "README.md")); err != nil {
+		t.Fatalf("taken over partly checked out: %v", err)
+	}
 
 	if err := manager.Remove(ctx, worker.Path); err != nil {
 		t.Fatalf("Remove worker: %v", err)
@@ -64,6 +86,26 @@ func TestCreateAndRemove(t *testing.T) {
 	}
 	if err := manager.Remove(ctx, integration.Path); err != nil {
 		t.Fatalf("Remove integration: %v", err)
+	}
+}
+
+// Git returns what git prints on stdout, which callers parse. What it prints
+// on stderr, such as a warning about a broken branch, goes only into errors.
+func TestGitKeepsStderrOutOfItsOutput(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	ctx := context.Background()
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "init")
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	t.Setenv("GIT_TRACE", "1") // git now writes a trace line to stderr for each command
+	if got, err := Git(ctx, repo, "rev-parse", "HEAD"); err != nil || got != head {
+		t.Fatalf("Git = %q, %v; want %s", got, err, head)
+	}
+	if _, err := Git(ctx, repo, "rev-parse", "--verify", "nosuch"); err == nil || !strings.Contains(err.Error(), "Needed a single revision") {
+		t.Fatalf("err = %v, want git's own message", err)
 	}
 }
 

@@ -43,6 +43,29 @@ func TestPersistLeadWritesImmediately(t *testing.T) {
 	}
 }
 
+// A teammate answering an @mention or a switch_ask has its session in use:
+// /lead and the lead picker wait for the answer, and say so.
+func TestLeadSwitchWaitsForATeammatesAnswer(t *testing.T) {
+	installAdapter(t, "exit 1") // the adapter is installed; nothing starts it
+	lead := config.Agent{Name: "lead", Role: "lead", Driver: "claude"}
+	builder := config.Agent{Name: "builder-1", Role: "builder", Driver: "claude"}
+	m := New(Options{Context: context.Background(), Project: t.TempDir(), Lead: lead, Fleet: []config.Agent{lead, builder}})
+	defer m.cancel()
+	m.team.asked["builder-1"] = true
+
+	next, cmd := m.handleSlash("/lead builder-1")
+	if got := next.(model); cmd != nil || got.lead.Name != "lead" || !strings.Contains(got.toastText(), "answering") {
+		t.Fatalf("/lead builder-1 while it answers: lead %q, toast %q", got.lead.Name, got.toastText())
+	}
+	next, _ = m.handleSlash("/lead")
+	m = next.(model)
+	m.picker.index = 1
+	next, cmd = m.Update(keyEnter())
+	if got := next.(model); cmd != nil || got.lead.Name != "lead" || got.picker == nil || !strings.Contains(got.picker.err, "answering") {
+		t.Fatalf("picking builder-1 while it answers: lead %q, picker %+v", got.lead.Name, got.picker)
+	}
+}
+
 func TestLeadCommandRejectsBareAdapterName(t *testing.T) {
 	m := model{
 		lead: config.Agent{Name: "lead", Role: "lead", Driver: "opencode"},

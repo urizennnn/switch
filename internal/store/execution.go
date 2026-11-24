@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -131,7 +132,8 @@ func (s *Store) migrateExecution() error {
 		if count > 0 {
 			continue
 		}
-		if _, err := s.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, c.table, c.column, c.def)); err != nil {
+		// Another process opening the database may add it between the check and here.
+		if _, err := s.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, c.table, c.column, c.def)); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("migrate %s.%s: %w", c.table, c.column, err)
 		}
 	}
@@ -149,6 +151,22 @@ func (s *Store) GetTask(ctx context.Context, id string) (Task, bool, error) {
 		return Task{}, false, err
 	}
 	return tasks[0], true, nil
+}
+
+// SaveTaskFrom saves the execution fields of a task still in status from and
+// reports whether it was, so two processes acting on one task cannot both win.
+func (s *Store) SaveTaskFrom(ctx context.Context, task Task, from string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE tasks SET status = ?, assignee = ?, branch = ?, worktree = ?, attempts = ?, session_id = ?,
+			commit_sha = ?, feedback = ?, review = ?, last_error = ?, summary = ?
+		WHERE id = ? AND status = ?`,
+		task.Status, task.Assignee, task.Branch, task.Worktree, task.Attempts, task.SessionID,
+		task.Commit, task.Feedback, task.Review, task.LastError, task.Summary, task.ID, from)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
 }
 
 func (s *Store) SetRunStatus(ctx context.Context, id, status string) error {

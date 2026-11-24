@@ -33,10 +33,14 @@ func Parse(s string) (Mode, bool) {
 	}
 }
 
-// Decide only auto-allows explicitly identified reads in build and plan.
-// Unknown operations always prompt in build and are denied in plan.
-func Decide(mode Mode, kind string) Decision {
-	read := strings.EqualFold(kind, "read") || strings.EqualFold(kind, "search")
+// Decide only auto-allows, in build and plan, explicitly identified reads
+// whose every path is inside the requester's own directory. Anything else
+// prompts in build and is denied in plan. A worker's edits ask too: a task
+// worktree separates git state, not processes, and verify runs what a worker
+// wrote on the host before anyone approves it.
+func Decide(mode Mode, kind string, inside bool) Decision {
+	kind = strings.ToLower(kind)
+	read := inside && (kind == "read" || kind == "search")
 	switch mode {
 	case Plan:
 		if read {

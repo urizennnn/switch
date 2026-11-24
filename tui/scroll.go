@@ -53,20 +53,22 @@ func (m *model) scroll(delta int) {
 		m.modalTop = max(0, min(total-room, m.modalTop+delta))
 	case m.focus != "":
 		total, room := m.agentLines()
-		top := m.agentTop
-		if top < 0 {
-			top = max(0, total-room)
-		}
-		top = max(0, top+delta)
-		if top >= total-room {
-			top = -1 // back at the end: follow new output
-		}
-		m.agentTop = top
-	case delta < 0:
-		m.viewport.ScrollUp(-delta)
+		m.agentTop = scrollTop(m.agentTop, delta, total, room)
 	default:
-		m.viewport.ScrollDown(delta)
+		m.chatTop = scrollTop(m.chatTop, delta, len(m.chatLines), m.chatRoom())
 	}
+}
+
+// scrollTop moves a pane's first shown line by delta; -1 follows the end.
+func scrollTop(top, delta, total, room int) int {
+	if top < 0 {
+		top = max(0, total-room)
+	}
+	top = max(0, top+delta)
+	if top >= total-room {
+		return -1 // back at the end: follow new output
+	}
+	return top
 }
 
 // window is the part of lines a pane shows: from top, or the end when top
@@ -111,9 +113,14 @@ func (m model) modalContent() (title, content, footer string) {
 		footer = "enter use them · esc not this session"
 	default:
 		title, content, footer = m.modalTitle, m.modal, "esc or enter to close"
+		if title == landTitle {
+			footer = "enter merges · esc closes"
+		}
 	}
 	width := min(82, max(44, m.width*2/3))
-	return title, lipgloss.NewStyle().Width(max(20, width-8)).Render(content), footer
+	// The panel's background, or the padding after a styled line, such as a
+	// colored diff's, shows the terminal's through the panel.
+	return title, lipgloss.NewStyle().Width(max(20, width-8)).Background(surface).Render(content), footer
 }
 
 func (m model) modalRoom() int { return max(4, m.height-10) }

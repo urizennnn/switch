@@ -8,9 +8,11 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // The status line is the only chrome outside the panes: what is happening
@@ -32,28 +34,19 @@ func (m model) statusLine() statusLine {
 	queued, active, review, merged, blocked := m.taskCounts()
 	switch {
 	case m.permission != nil:
-		who := lead
-		switch {
-		case m.permission.Agent != "":
+		who := lead // workers, teammates and subagents always name themselves
+		if m.permission.Agent != "" {
 			who = strings.ReplaceAll(m.permission.Agent, "/", " › ")
-		case m.job == "run":
-			who = "a worker"
 		}
-		hint := "esc deny"
-		if n := len(m.permission.Options); n > 0 {
-			hint = fmt.Sprintf("1-%d choose · esc deny", n)
-		}
-		return statusLine{color: violet, mark: "▲", label: "permission", detail: who + " asks: " + m.permission.Title, hint: hint}
+		return statusLine{color: violet, mark: "▲", label: promptName(m.permission), detail: who + " asks: " + m.permission.Title, hint: promptKeys(m.permission)}
 
-	case m.state == "error" || m.state == "exited" || m.state == "agent unavailable" || m.state == "missing":
+	case m.state == "error" || m.state == "exited":
 		detail := "the last turn failed"
 		switch {
 		case m.connectErr != nil:
 			detail = m.connectErr.Error()
 		case m.state == "exited":
 			detail = m.lead.Driver + " stopped"
-		case m.state != "error":
-			detail = m.lead.Driver + " is not available"
 		}
 		return statusLine{color: red, mark: "✕", label: m.state, detail: detail, hint: "/lead · /doctor"}
 
@@ -180,6 +173,56 @@ func (m model) statusView(width int) string {
 		left += gap + mutedStyle.Render(truncate(s.detail, n))
 	}
 	return statusBar(width, left, right())
+}
+
+// windowTitle names Switch and what waits on the user, so another window or
+// tab shows it.
+func (m model) windowTitle() string {
+	_, _, review, _, _ := m.taskCounts()
+	switch {
+	case m.permission != nil:
+		return "▲ " + promptName(m.permission) + " · switch"
+	case review > 0:
+		return fmt.Sprintf("● %d to review · switch", review)
+	}
+	return "switch"
+}
+
+// attentionAfter is how long a lead turn runs before its end is worth a ping.
+const attentionAfter = 30 * time.Second
+
+// ping rings the bell and sends a desktop notification (OSC 9) when Switch
+// comes to need the user while the terminal is in the background: a
+// permission prompt opens, a task is ready for review, the run ends, or a
+// long lead turn finishes.
+func (m model) ping(prev model) tea.Cmd {
+	if !m.blurred {
+		return nil
+	}
+	_, _, review, _, _ := m.taskCounts()
+	_, _, reviewBefore, _, _ := prev.taskCounts()
+	running := func(x model) bool { return x.job == "run" || x.runOwner != 0 }
+	var text string
+	switch {
+	case m.permission != nil && m.permission != prev.permission:
+		text = m.statusLine().detail
+	case review > reviewBefore:
+		text = plural(review, "task") + " ready for review"
+	case running(prev) && !running(m) && m.run != nil:
+		text, _, _ = strings.Cut(runOutcomeText(m.run.Status, nil), "\n")
+	case prev.busy && !m.busy && time.Since(prev.turnStarted) >= attentionAfter:
+		text = m.lead.Name + " finished"
+	default:
+		return nil
+	}
+	// Agents write prompt titles; a control character would end the sequence.
+	text = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, truncate(text, 120))
+	return tea.Raw("\a" + ansi.Notify("Switch: "+text))
 }
 
 func (m model) warmWorkers() int {

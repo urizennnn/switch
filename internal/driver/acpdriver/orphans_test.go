@@ -15,8 +15,11 @@ import (
 
 func TestReapOrphansKillsOnlyAbandonedAdapters(t *testing.T) {
 	dir := t.TempDir()
-	start := func() *exec.Cmd {
+	start := func(title ...string) *exec.Cmd {
 		cmd := exec.Command("sleep", "30")
+		if len(title) > 0 {
+			cmd.Args[0] = title[0] // as npm retitles npx
+		}
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
@@ -38,14 +41,16 @@ func TestReapOrphansKillsOnlyAbandonedAdapters(t *testing.T) {
 
 	orphan := start()
 	record(deadOwner, orphan.Process.Pid, "sleep", "30")
+	npx := start("npm exec @agentclientprotocol/codex-acp@2.5.0")
+	record(deadOwner, npx.Process.Pid, "npx", "-y", "@agentclientprotocol/codex-acp@2.5.0")
 	owned := start()
 	record(os.Getpid(), owned.Process.Pid, "sleep", "30") // its owner is alive
 	reused := start()
 	record(deadOwner, reused.Process.Pid, "node", "codex-acp") // PID now runs something else
 
 	reaped, err := ReapOrphans(dir)
-	if err != nil || reaped != 1 {
-		t.Fatalf("ReapOrphans = %d, %v; want 1", reaped, err)
+	if err != nil || reaped != 2 {
+		t.Fatalf("ReapOrphans = %d, %v; want 2", reaped, err)
 	}
 	waitExit := func(cmd *exec.Cmd) bool {
 		done := make(chan struct{})
@@ -57,7 +62,7 @@ func TestReapOrphansKillsOnlyAbandonedAdapters(t *testing.T) {
 			return false
 		}
 	}
-	if !waitExit(orphan) {
+	if !waitExit(orphan) || !waitExit(npx) {
 		t.Fatal("orphan was not killed")
 	}
 	if !processAlive(owned.Process.Pid) || !processAlive(reused.Process.Pid) {

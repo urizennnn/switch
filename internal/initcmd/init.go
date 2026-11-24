@@ -33,6 +33,6 @@ func Run(args []string) int {
 	for _, path := range created {
 		fmt.Printf("  created %s\n", path)
 	}
-	fmt.Println("\nnext: switch chat")
+	fmt.Printf("\nnext: run `switch` in %s\n", project)
 	return 0
 }

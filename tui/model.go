@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/textinput"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/urizennnn/switch/internal/chat"
 	"github.com/urizennnn/switch/internal/config"
@@ -44,18 +43,26 @@ type model struct {
 	lead         config.Agent
 	previousLead config.Agent
 
-	input    textinput.Model
-	viewport viewport.Model
-	width    int
-	height   int
+	input     textinput.Model
+	chatLines []string // the conversation, wrapped to the main pane
+	chatTop   int      // first conversation line shown; -1 follows the end
+	width     int
+	height    int
+	blurred   bool // the terminal reported it lost focus
 
-	entries    []entry
-	queued     string // sent once the lead connects
-	busy       bool
-	state      string
-	gen        int
-	permission *acpdriver.PermissionRequest
-	err        error
+	entries         []entry
+	reply           string // the lead's reply so far this turn, every part of it
+	queued          string // typed while the lead was busy or connecting; Update sends it once the lead is free
+	busy            bool
+	sending         bool // a Send to the lead has not returned yet
+	state           string
+	gen             int
+	permission      *acpdriver.PermissionRequest // the prompt on screen
+	permissionJob   bool                         // it is a run worker's
+	permissionQueue []pendingPermission          // prompts waiting behind it
+	permissionHold  time.Time                    // until then, keys cannot answer it
+	answer          textinput.Model              // a question's typed answer, apart from the user's message
+	err             error
 
 	connecting       bool
 	connectErr       error
@@ -77,7 +84,6 @@ type model struct {
 	clockRunning     bool
 	branch           string
 	dirty            int // uncommitted files
-	permissionResume tea.Cmd
 	engine           *execution.Engine
 	runConfig        config.RunConfig
 	permissionMode   policy.Mode
@@ -91,7 +97,10 @@ type model struct {
 	installing       string // adapter action running in the background
 	team             *team
 	listenStop       chan struct{}
-	runOwner         int // PID of another process driving the run, such as a detached run
+	runOwner         int     // PID of another process driving the run, such as a detached run
+	fixing           string  // the task whose fix by hand Switch is checking
+	planWarned       string  // the unfinished run /plan warned it would replace
+	landing          landMsg // the preview /land showed; enter in its panel or /land again merges as it said
 	picker           *leadPicker
 	adapterPicker    *adapterPicker
 	run              *store.Run
@@ -112,8 +121,9 @@ type model struct {
 	showCommands     bool   // ctrl+e
 	resume           string // session to reopen on connect
 	handoffs         chan handoffMsg
-	pendingHandoff   *handoffMsg // starts when the lead's turn ends
-	handoff          *handoffMsg // delivered to the new lead once it connects
+	pendingHandoff   *handoffMsg     // starts when the lead's turn ends
+	handoff          *handoffMsg     // delivered to the new lead once it connects
+	limited          map[string]bool // leads a limit stopped since the user's last message
 	palette          []slashCommand
 	paletteIndex     int
 	paletteOpen      bool
@@ -127,14 +137,9 @@ func New(opts Options) model {
 	input.SetVirtualCursor(true)
 	input.SetWidth(60)
 	input.Focus()
-
-	viewportModel := viewport.New(
-		viewport.WithWidth(80),
-		viewport.WithHeight(18),
-	)
-	// Wrap once when content changes instead of rescanning every line on
-	// every scroll event (viewport SoftWrap calculates widths repeatedly).
-	viewportModel.SoftWrap = false
+	answer := textinput.New()
+	answer.Prompt = ""
+	answer.Focus()
 
 	m := model{
 		ctx:            ctx,
@@ -148,7 +153,8 @@ func New(opts Options) model {
 		runConfig:      opts.Run,
 		permissionMode: policy.Build,
 		input:          input,
-		viewport:       viewportModel,
+		answer:         answer,
+		chatTop:        -1,
 		width:          80,
 		height:         24,
 		state:          "connecting",
@@ -161,7 +167,9 @@ func New(opts Options) model {
 	m.teamPerms = make(chan *acpdriver.PermissionRequest)
 	m.agentEntries, m.agentBusy = map[string][]entry{}, map[string]time.Time{}
 	m.team = newTeam(m.project, m.dashboardFleet(), m.lead.Name)
-	m.team.ctx, m.team.events, m.team.perms, m.team.subCfg = ctx, m.streams, m.teamPerms, opts.Run.Subagents
+	m.team.base = ctx
+	m.team.ctx, m.team.stop = context.WithCancel(ctx)
+	m.team.events, m.team.perms, m.team.subCfg, m.team.rules = m.streams, m.teamPerms, opts.Run.Subagents, m.rules
 	m.handoffs = make(chan handoffMsg, 1)
 	m.team.handoffs, m.team.handoffAt = m.handoffs, opts.Run.HandoffAt
 	m.listenStop = make(chan struct{})
@@ -203,14 +211,23 @@ func (m *model) loadHistory() {
 	if m.chat == nil {
 		return
 	}
-	messages, err := m.chat.History(m.ctx, 50)
+	messages, err := m.chat.History(m.ctx, 51)
 	if err != nil {
 		return
+	}
+	if len(messages) > 50 {
+		messages = messages[1:]
+		m.appendSystem("earlier messages are not shown")
 	}
 	for _, message := range messages {
 		switch message.Role {
 		case "user":
-			m.appendUser(message.Content)
+			content := strings.TrimPrefix(message.Content, planModeNote)
+			if strings.HasPrefix(content, "[Switch] ") { // Switch's own prompt, such as a handoff
+				m.appendSystem(content)
+				break
+			}
+			m.appendUser(content)
 		case "assistant":
 			m.appendAssistantChunk(message.Content)
 			m.closeAssistant()
@@ -242,6 +259,15 @@ func (m *model) refreshDashboard() {
 	if m.store == nil || m.project == "" {
 		return
 	}
+	defer func() {
+		tasks, run := m.tasks, m.run
+		if m.job != "run" && m.runOwner == 0 {
+			tasks, run = nil, nil // nothing drives the run, so no task turn runs, whatever the store says
+		}
+		m.team.setRunTasks(tasks, m.runAgents)
+		m.team.bindRun(m.store, run, m.engine)
+		m.settleBusy()
+	}()
 	run, ok, err := m.store.LatestRun(m.ctx, m.project)
 	if err != nil || !ok {
 		m.run = nil

@@ -2,12 +2,21 @@ package plan
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 )
 
-var idPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+// A task runs on the git branch switch/<run>/task-<id>, so an id must stay a
+// valid branch name component that the worktree name never truncates.
+var idPattern = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$`)
+
+const maxIDLength = 40
+
+// planStart matches an object whose first key is a plan's.
+var planStart = regexp.MustCompile(`(?i)^\{\s*"(goal|tasks)"`)
 
 type Plan struct {
 	Goal  string `json:"goal"`
@@ -19,27 +28,74 @@ type Task struct {
 	Title      string   `json:"title"`
 	Brief      string   `json:"brief"`
 	Role       string   `json:"role"`
+	Agent      string   `json:"agent,omitempty"` // pins the task to this worker
 	Deps       []string `json:"deps,omitempty"`
 	Files      []string `json:"files,omitempty"`
 	Acceptance []string `json:"acceptance,omitempty"`
 	Verify     []string `json:"verify,omitempty"`
 }
 
-// Parse extracts the first JSON object from agent output and validates it.
-// Models often wrap JSON in prose or a fenced code block.
-func Parse(output string) (Plan, error) {
-	raw := extractJSON(output)
-	if raw == "" {
+// Parse finds the plan in agent output: the first JSON object that decodes,
+// validates and passes checks. Models wrap the JSON in prose, code fences and
+// other snippets, so each '{' is tried in turn; text after the plan is ignored.
+func Parse(output string, checks ...func(Plan) error) (Plan, error) {
+	var planErr error
+	var planLike bool
+	var planRead int64 = -1
+	for i := strings.IndexByte(output, '{'); i >= 0; {
+		plan, read, err := decode(output[i:])
+		for _, check := range checks {
+			if err == nil {
+				err = check(plan)
+			}
+		}
+		if err == nil {
+			return plan, nil
+		}
+		// Report the plan's own error: an object that starts like a plan beats
+		// one that does not (such as a task inside a broken plan), then the one
+		// that read the most text beats a stray brace in prose.
+		like := planStart.MatchString(output[i:])
+		if (like && !planLike) || (like == planLike && read > planRead) {
+			planErr, planLike, planRead = err, like, read
+		}
+		next := strings.IndexByte(output[i+1:], '{')
+		if next < 0 {
+			break
+		}
+		i += 1 + next
+	}
+	if planErr == nil {
 		return Plan{}, fmt.Errorf("no JSON object found in plan output")
 	}
+	return Plan{}, planErr
+}
+
+// decode reads one plan from the start of text and reports how much of text
+// it read.
+func decode(text string) (Plan, int64, error) {
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.DisallowUnknownFields()
 	var plan Plan
-	if err := json.Unmarshal([]byte(raw), &plan); err != nil {
-		return Plan{}, fmt.Errorf("decode plan: %w", err)
+	if err := decoder.Decode(&plan); err != nil {
+		read := decoder.InputOffset()
+		var syntax *json.SyntaxError
+		if errors.As(err, &syntax) {
+			read = syntax.Offset
+		} else if errors.Is(err, io.ErrUnexpectedEOF) {
+			read = int64(len(text))
+		}
+		return Plan{}, read, fmt.Errorf("decode plan: %w", err)
 	}
-	if err := plan.Validate(); err != nil {
-		return Plan{}, err
+	// Ids, roles and agents are keys, so stray whitespace must not hide a match.
+	for i := range plan.Tasks {
+		task := &plan.Tasks[i]
+		task.ID, task.Role, task.Agent = strings.TrimSpace(task.ID), strings.TrimSpace(task.Role), strings.TrimSpace(task.Agent)
+		for j := range task.Deps {
+			task.Deps[j] = strings.TrimSpace(task.Deps[j])
+		}
 	}
-	return plan, nil
+	return plan, decoder.InputOffset(), plan.Validate()
 }
 
 func (p Plan) Validate() error {
@@ -54,18 +110,18 @@ func (p Plan) Validate() error {
 	}
 
 	seen := make(map[string]bool, len(p.Tasks))
+	folded := make(map[string]bool, len(p.Tasks)) // branch names ignore case on macOS and Windows
 	for i, task := range p.Tasks {
-		task.ID = strings.TrimSpace(task.ID)
 		if task.ID == "" {
 			return fmt.Errorf("task %d: id is required", i+1)
 		}
-		if !idPattern.MatchString(task.ID) {
-			return fmt.Errorf("task %q: id must start alphanumeric and contain only letters, digits, dot, underscore, or dash", task.ID)
+		if len(task.ID) > maxIDLength || !idPattern.MatchString(task.ID) || strings.Contains(task.ID, "..") || strings.HasSuffix(task.ID, ".lock") {
+			return fmt.Errorf("task %q: id must work as a git branch name: at most %d letters, digits, dots, underscores or dashes, starting and ending with a letter or digit, with no \"..\" and no \".lock\" ending", task.ID, maxIDLength)
 		}
-		if seen[task.ID] {
-			return fmt.Errorf("duplicate task id %q", task.ID)
+		if folded[strings.ToLower(task.ID)] {
+			return fmt.Errorf("duplicate task id %q (ids are compared ignoring case)", task.ID)
 		}
-		seen[task.ID] = true
+		seen[task.ID], folded[strings.ToLower(task.ID)] = true, true
 		if strings.TrimSpace(task.Title) == "" {
 			return fmt.Errorf("task %q: title is required", task.ID)
 		}
@@ -82,7 +138,6 @@ func (p Plan) Validate() error {
 
 	for _, task := range p.Tasks {
 		for _, dep := range task.Deps {
-			dep = strings.TrimSpace(dep)
 			if dep == task.ID {
 				return fmt.Errorf("task %q depends on itself", task.ID)
 			}
@@ -102,7 +157,7 @@ func validateAcyclic(tasks []Task) error {
 	graph := make(map[string][]string, len(tasks))
 	for _, task := range tasks {
 		for _, dep := range task.Deps {
-			graph[task.ID] = append(graph[task.ID], strings.TrimSpace(dep))
+			graph[task.ID] = append(graph[task.ID], dep)
 		}
 	}
 
@@ -136,31 +191,4 @@ func validateAcyclic(tasks []Task) error {
 		}
 	}
 	return nil
-}
-
-func extractJSON(output string) string {
-	output = strings.TrimSpace(output)
-	if output == "" {
-		return ""
-	}
-
-	if start := strings.Index(output, "```"); start >= 0 {
-		body := output[start+3:]
-		if newline := strings.IndexByte(body, '\n'); newline >= 0 {
-			body = body[newline+1:]
-		}
-		if end := strings.Index(body, "```"); end >= 0 {
-			body = body[:end]
-		}
-		if candidate := strings.TrimSpace(body); strings.HasPrefix(candidate, "{") {
-			return candidate
-		}
-	}
-
-	first := strings.Index(output, "{")
-	last := strings.LastIndex(output, "}")
-	if first >= 0 && last > first {
-		return strings.TrimSpace(output[first : last+1])
-	}
-	return ""
 }

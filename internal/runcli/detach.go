@@ -14,7 +14,8 @@ import (
 // Detach starts a background `switch __control run --wait` for the run and
 // returns once it holds the run lock. The run keeps going after the TUI or
 // terminal exits; approve its tasks from the TUI or with `__control approve`.
-func Detach(project, stateDir, runID, permission string) (pid int, logPath string, err error) {
+// noProjectRules carries a decline of the project's rules to the run.
+func Detach(project, stateDir, runID, permission string, noProjectRules bool) (pid int, logPath string, err error) {
 	if pid, ok := execution.RunOwner(stateDir, runID); ok {
 		return 0, "", fmt.Errorf("%w (pid %d)", execution.ErrRunBusy, pid)
 	}
@@ -33,7 +34,11 @@ func Detach(project, stateDir, runID, permission string) (pid int, logPath strin
 	}
 	defer logFile.Close()
 
-	cmd := exec.Command(exe, "__control", "run", "--cwd", project, "--run", runID, "--permission", permission, "--wait")
+	args := []string{"__control", "run", "--cwd", project, "--run", runID, "--permission", permission, "--wait"}
+	if noProjectRules {
+		args = append(args, "--no-project-rules")
+	}
+	cmd := exec.Command(exe, args...)
 	cmd.Dir = project
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	if err := startDetached(cmd); err != nil {
@@ -57,15 +62,20 @@ func Detach(project, stateDir, runID, permission string) (pid int, logPath strin
 	}
 }
 
-// Stop interrupts the process driving the run and waits for it to let go.
-// Its running tasks become interrupted, the same as /stop in the TUI.
+// Stop interrupts the headless process driving the run, such as a detached
+// run, and waits for it to let go. Its running tasks become interrupted, the
+// same as /stop in the TUI. A TUI driving the run is refused: SIGINT would
+// end it without that cleanup and lose its chat.
 func Stop(stateDir, runID string) error {
-	pid, ok := execution.RunOwner(stateDir, runID)
+	pid, headless, ok := execution.RunOwnerHeadless(stateDir, runID)
 	if !ok {
 		return fmt.Errorf("run %s is not running", shortID(runID))
 	}
 	if pid == os.Getpid() {
 		return fmt.Errorf("this process drives the run; use /stop")
+	}
+	if !headless {
+		return fmt.Errorf("a Switch TUI (pid %d) drives run %s; stop it there with /stop", pid, shortID(runID))
 	}
 	if err := interrupt(pid); err != nil {
 		return err

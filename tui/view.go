@@ -8,6 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
+	"github.com/urizennnn/switch/internal/execution"
 	"github.com/urizennnn/switch/internal/store"
 )
 
@@ -21,6 +22,8 @@ func (m model) View() tea.View {
 	v := tea.NewView(m.withToasts(m.screen(), width))
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
+	v.ReportFocus = true // ping only tells a user who is in another window
+	v.WindowTitle = m.windowTitle()
 	return v
 }
 
@@ -39,7 +42,11 @@ func (m model) screen() string {
 
 	switch {
 	case m.permission != nil:
-		return m.withModal(base, width, "permission", m.permissionContent(), "1-9 choose · esc deny")
+		footer := promptKeys(m.permission)
+		if n := len(m.permissionQueue); n > 0 {
+			footer += fmt.Sprintf(" · %d more waiting", n)
+		}
+		return m.withModal(base, width, promptName(m.permission), m.permissionContent(), footer)
 	case m.adapterPicker != nil:
 		footer := "↑/↓ select · enter act · esc cancel"
 		if m.adapterPicker.pending != "" {
@@ -99,12 +106,17 @@ func (m *model) layout() {
 	if width <= 0 {
 		width = 80
 	}
-	_, mainWidth := m.paneWidths(width)
-
-	m.viewport.SetWidth(max(20, mainWidth-4))
-	m.viewport.SetHeight(max(3, m.mainPaneHeight()-3))
-	m.input.SetWidth(max(10, width-4))
+	// The bar is width-2 wide; its border and padding take 4, "› " 2 and the cursor 1.
+	m.input.SetWidth(max(10, width-9))
 }
+
+// chatWidth and chatRoom are the conversation's text area in the main pane.
+func (m model) chatWidth() int {
+	_, mainWidth := m.paneWidths(m.width)
+	return max(20, mainWidth-4)
+}
+
+func (m model) chatRoom() int { return max(1, m.mainPaneHeight()-3) }
 
 // mainPaneHeight leaves room for the job log while a job runs.
 func (m model) mainPaneHeight() int {
@@ -169,8 +181,8 @@ func (m model) sidebarContent(width int) string {
 	b.WriteString(dimStyle.Render("  " + truncate(m.leadDetail(), inner-2)))
 	b.WriteString("\n")
 
-	// Workers take tasks. An agent configured as lead that is not leading
-	// cannot, so it is left out; /lead still offers it.
+	// Everyone else, so each can be followed: a standby lead takes no tasks
+	// but answers questions.
 	if workers := m.workers(); len(workers) > 0 {
 		b.WriteString("\n")
 		b.WriteString(section("workers"))
@@ -191,7 +203,7 @@ func (m model) sidebarContent(width int) string {
 			}
 			b.WriteString(dimStyle.Render("○ ") + nameStyle.Render(name) + strings.Repeat(" ", gap) + stateStyle.Render(state))
 			b.WriteString("\n")
-			b.WriteString(dimStyle.Render("  " + truncate(agent.Role+" · "+agent.Driver, inner-2)))
+			b.WriteString(dimStyle.Render("  " + truncate(m.roleLabel(agent)+" · "+agent.Driver, inner-2)))
 			b.WriteString("\n")
 			b.WriteString(m.subagentRows(agent.Name, inner))
 		}
@@ -231,6 +243,8 @@ func (m model) sidebarContent(width int) string {
 			hint = "/tasks · /stop"
 		case review > 0:
 			hint = "/review to approve"
+		case m.run.Status == execution.RunCompleted:
+			hint = "/land merges it"
 		}
 		b.WriteString(dimStyle.Render(hint))
 		b.WriteString("\n")
@@ -254,8 +268,10 @@ func (m model) mainTitle() string {
 		return m.breadcrumb()
 	case m.home:
 		return "overview"
+	case m.chatTop >= 0:
+		return "conversation" + below(len(m.chatLines)-m.chatTop-m.chatRoom())
 	default:
-		return "conversation" + below(m.viewport.TotalLineCount()-m.viewport.YOffset()-m.viewport.VisibleLineCount())
+		return "conversation"
 	}
 }
 
@@ -270,7 +286,7 @@ func (m model) mainContent(width, height int) string {
 	case m.home:
 		return m.overviewContent(width)
 	default:
-		return m.viewport.View()
+		return strings.Join(window(m.chatLines, m.chatTop, m.chatRoom()), "\n")
 	}
 }
 
@@ -452,7 +468,7 @@ func (m model) jobLogTitle() string {
 	if m.job == "plan" {
 		return "plan log · esc to cancel"
 	}
-	return "run log · /stop to end"
+	return "run log · /stop to end · /log reads it all"
 }
 
 // adapterSource reports how an adapter is launched: installed, npx, or missing.
@@ -488,38 +504,56 @@ func (m model) leadDetail() string {
 	return m.lead.Driver + " · " + model
 }
 
-// workers are the agents that can take tasks: not the lead, and not an agent
-// configured only to lead.
+// workers are the agents the main pane can follow besides the lead's chat:
+// everyone else, standby leads too, and the lead itself while a run uses it,
+// for a task or for a review streaming under its name.
 func (m model) workers() []config.Agent {
 	var out []config.Agent
 	for _, agent := range m.dashboardFleet() {
-		if agent.Name != m.lead.Name && agent.Role != "lead" {
+		_, task := m.agentTask(agent.Name)
+		_, streaming := m.agentBusy[agent.Name]
+		if agent.Name != m.lead.Name || task || streaming {
 			out = append(out, agent)
 		}
 	}
 	return out
 }
 
-// permissionContent shows who asks to do what, and the answers.
+// permissionContent shows who asks to do what, or asks the user what, and the
+// answers.
 func (m model) permissionContent() string {
 	p := m.permission
 	who := m.lead.Name
 	if p.Agent != "" {
 		who = strings.ReplaceAll(p.Agent, "/", " › ")
 	}
-	var b strings.Builder
-	b.WriteString(textStyle.Bold(true).Render(who) + mutedStyle.Render(" wants to") + "\n\n")
-	action := p.Title
-	if p.Kind != "" {
+	question := p.Kind == acpdriver.KindQuestion
+	verb, action := " wants to", p.Title
+	switch {
+	case question:
+		verb = " asks you"
+	case p.Kind != "":
 		action = p.Kind + " · " + action
 	}
+	var b strings.Builder
+	b.WriteString(textStyle.Bold(true).Render(who) + mutedStyle.Render(verb) + "\n\n")
 	b.WriteString(textStyle.Render(action) + "\n\n")
 	for i, option := range p.Options {
 		style := mutedStyle
-		if strings.HasPrefix(option.Kind, "allow") {
+		if question || strings.HasPrefix(option.Kind, "allow") {
 			style = textStyle
 		}
 		b.WriteString(labelStyle.Render(fmt.Sprintf("%d", i+1)) + "  " + style.Render(option.Name) + "\n")
+	}
+	if question && len(p.Options) == 0 {
+		b.WriteString(brandStyle.Render("› ") + m.answer.View())
+	}
+	// After the answers, so that a short terminal cuts paths rather than them.
+	if len(p.Paths) > 0 {
+		b.WriteString("\n")
+	}
+	for _, path := range p.Paths {
+		b.WriteString(mutedStyle.Render(path) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

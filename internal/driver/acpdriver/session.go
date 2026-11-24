@@ -1,8 +1,9 @@
 package acpdriver
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -31,8 +32,8 @@ type Spec struct {
 	// Ephemeral sessions are closed on the agent when the Session closes.
 	// Others stay resumable: some adapters delete a session on close.
 	Ephemeral bool
-	// AgentLogs, when non-nil, receives adapter stderr. Otherwise stderr is
-	// buffered for diagnostics.
+	// AgentLogs, when non-nil, receives adapter stderr. Otherwise the end of
+	// stderr is kept for error messages.
 	AgentLogs io.Writer
 }
 
@@ -105,7 +106,12 @@ type PermissionRequest struct {
 	ToolCallID string
 	Title      string
 	Kind       string // read, edit, execute, …; empty when the agent did not say
-	Options    []PermissionOption
+	// Paths are the files it names, absolute, as shown to the user. Inside
+	// says every one is within the session's directory and outside git's and
+	// the agents' settings there; naming none is not.
+	Paths   []string
+	Inside  bool
+	Options []PermissionOption
 
 	response chan PermissionDecision
 }
@@ -150,22 +156,24 @@ type Session struct {
 	waitCh      <-chan error
 	cancel      context.CancelFunc
 	init        acp.InitializeResponse
-	stderr      bytes.Buffer
+	stderr      tailBuffer
 	done        chan struct{}
 	closeOnce   sync.Once
 	ephemeral   bool
 	exitMu      sync.Mutex
 	exitErr     error
-	kindMu      sync.Mutex
-	kinds       map[string]string // tool call ID -> kind, for permission requests
+	mu          sync.Mutex
+	kinds       map[string]string   // tool call ID -> kind, for permission requests
+	named       map[string][]string // tool call ID -> paths its updates named, for permission requests
+	notice      string              // the turn's last message chunk, when the adapter sent it without a message ID
 }
 
-// Open starts an adapter, initializes ACP, and creates or resumes a session.
-func Open(ctx context.Context, spec Spec) (*Session, error) {
+// start launches an adapter and initializes ACP.
+func start(ctx context.Context, spec Spec) (*Session, error) {
 	if spec.Agent == "" {
 		spec.Agent = "opencode"
 	}
-	spec.Agent = strings.ToLower(strings.TrimSpace(spec.Agent))
+	spec.Agent = DriverName(spec.Agent)
 
 	cwd, err := filepath.Abs(spec.Cwd)
 	if err != nil {
@@ -179,9 +187,9 @@ func Open(ctx context.Context, spec Spec) (*Session, error) {
 		return nil, fmt.Errorf("cwd %s is not a directory", cwd)
 	}
 
+	adapter, err := ResolveAdapter(spec.Agent)
 	command := spec.Command
 	if len(command) == 0 {
-		adapter, err := ResolveAdapter(spec.Agent)
 		if err != nil {
 			return nil, err
 		}
@@ -203,16 +211,23 @@ func Open(ctx context.Context, spec Spec) (*Session, error) {
 	cmd := exec.CommandContext(runCtx, command[0], command[1:]...)
 	configureProcess(cmd)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "NO_COLOR=1")
-	cmd.Env = append(cmd.Env, spec.Env...)
-	if spec.Agent == "openclaw" {
-		cmd.Env = append(cmd.Env, "OPENCLAW_HIDE_BANNER=1", "OPENCLAW_SUPPRESS_NOTES=1")
+	if command[0] == npxBinary {
+		// npx runs a package the directory's node_modules holds over the
+		// registry's, so a repository could supply the adapter. ACP gives it
+		// the session's directory on its own.
+		cmd.Dir = os.TempDir()
 	}
+	cmd.Env = append(os.Environ(), "NO_COLOR=1")
+	cmd.Env = append(cmd.Env, adapter.Env...)
+	cmd.Env = append(cmd.Env, spec.Env...)
 	if spec.AgentLogs != nil {
 		cmd.Stderr = spec.AgentLogs
 	} else {
 		cmd.Stderr = &session.stderr
 	}
+	// A child the adapter leaves holding its output must not keep Wait, and
+	// so the session, from ending.
+	cmd.WaitDelay = time.Second
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -233,12 +248,15 @@ func Open(ctx context.Context, spec Spec) (*Session, error) {
 	session.waitCh = waitCh
 	go func() {
 		err := cmd.Wait()
+		// Stop what the adapter left in its group, such as a dev server it
+		// started. The group ID cannot be reused while any of it runs.
+		_ = killGroup(cmd.Process.Pid)
 		untrack()
 		session.exitMu.Lock()
 		session.exitErr = err
 		session.exitMu.Unlock()
 		select {
-		case session.events <- Event{Type: EventExit, SessionID: session.ID, Err: err}:
+		case session.events <- Event{Type: EventExit, SessionID: session.ID, Err: session.exited()}:
 		default:
 		}
 		close(session.done)
@@ -249,6 +267,21 @@ func Open(ctx context.Context, spec Spec) (*Session, error) {
 	conn := acp.NewClientSideConnection(client, stdin, stdout)
 	conn.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	session.conn = conn
+	// The SDK drops the connection on a line over 10 MB or a full update
+	// queue and leaves the adapter running. End it, so the session reads as
+	// exited instead of failing every prompt.
+	go func() {
+		select {
+		case <-conn.Done():
+		case <-session.done:
+			return
+		}
+		select {
+		case <-session.done: // it exited, which closed its output
+		case <-time.After(time.Second):
+			cancel()
+		}
+	}()
 
 	initCtx, initCancel := context.WithTimeout(ctx, 60*time.Second)
 	initResp, err := conn.Initialize(initCtx, acp.InitializeRequest{
@@ -269,15 +302,29 @@ func Open(ctx context.Context, spec Spec) (*Session, error) {
 		return nil, session.wrapError("initialize", err)
 	}
 	session.init = initResp
+	session.Caps = buildReport(spec.Agent, command, initResp)
+	return session, nil
+}
 
-	state, err := openSession(ctx, conn, initResp, spec.Agent, cwd, spec.SessionID, spec.MCPServers)
+// Open starts an adapter, initializes ACP, and creates or resumes a session.
+func Open(ctx context.Context, spec Spec) (*Session, error) {
+	session, err := start(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	conn := session.conn
+
+	// Like initialize, session setup has a deadline: a wedged adapter must not
+	// hang startup. Loading a long session replays it, so allow more time.
+	setupCtx, setupCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer setupCancel()
+	state, err := openSession(setupCtx, conn, session.init, session.Agent, session.Cwd, spec.SessionID, spec.MCPServers)
 	if err != nil {
 		session.Close(context.Background())
 		return nil, session.wrapError("session", err)
 	}
 	session.ID = string(state.ID)
 	session.ResumeError = state.ResumeErr
-	session.Caps = buildReport(spec.Agent, command, initResp)
 	session.Caps.SessionID = session.ID
 	session.Caps.Config = configOptions(state.ConfigOptions)
 	if state.Modes != nil {
@@ -287,7 +334,7 @@ func Open(ctx context.Context, spec Spec) (*Session, error) {
 	}
 
 	if spec.Model != "" {
-		updated, err := setSessionModel(ctx, conn, state.ID, state.ConfigOptions, spec.Model)
+		updated, err := setSessionModel(setupCtx, conn, state.ID, state.ConfigOptions, spec.Model)
 		if err != nil {
 			session.Close(context.Background())
 			return nil, session.wrapError("set model", err)
@@ -298,14 +345,40 @@ func Open(ctx context.Context, spec Spec) (*Session, error) {
 	return session, nil
 }
 
+// Handshake starts an agent's adapter, initializes ACP and stops it, to
+// report what the adapter says about itself without opening a session.
+func Handshake(ctx context.Context, agent, cwd string) (CapabilitiesReport, error) {
+	session, err := start(ctx, Spec{Agent: agent, Cwd: cwd})
+	if err != nil {
+		return CapabilitiesReport{}, err
+	}
+	_ = session.Close(context.Background())
+	return session.Caps, nil
+}
+
 // Prompt sends a user message and returns when the turn ends. Events stream on
 // Session.Events while it runs.
 func (s *Session) Prompt(ctx context.Context, text string) (acp.PromptResponse, error) {
+	s.mu.Lock()
+	s.notice = ""
+	s.mu.Unlock()
 	resp, err := s.conn.Prompt(ctx, acp.PromptRequest{
 		SessionId: acp.SessionId(s.ID),
 		Prompt:    []acp.ContentBlock{acp.TextBlock(text)},
 	})
+	if err == nil && resp.StopReason == acp.StopReasonEndTurn {
+		err = s.limitNotice()
+	}
 	if err != nil {
+		select {
+		case <-s.conn.Done(): // the adapter is gone: say how it ended, not that the connection did
+			select {
+			case <-s.done:
+				err = s.exited()
+			case <-ctx.Done():
+			}
+		default:
+		}
 		s.emit(Event{Type: EventError, SessionID: s.ID, Err: err})
 		return resp, err
 	}
@@ -323,6 +396,35 @@ func (s *Session) Prompt(ctx context.Context, text string) (acp.PromptResponse, 
 
 func (s *Session) Cancel(ctx context.Context) error {
 	return s.conn.Cancel(ctx, acp.CancelNotification{SessionId: acp.SessionId(s.ID)})
+}
+
+// Steer adds text to the turn that is running, through the adapter's
+// steering extension (Caps.Steering). It fails when no turn is running.
+func (s *Session) Steer(ctx context.Context, text string) error {
+	if !s.Caps.Steering {
+		return fmt.Errorf("%s cannot steer a running turn", s.Agent)
+	}
+	raw, err := s.conn.CallExtension(ctx, "_session/steering", map[string]any{
+		"sessionId": s.ID,
+		"prompt":    []acp.ContentBlock{acp.TextBlock(text)},
+		// Otherwise an idle adapter starts a turn of its own that no RunTurn reads.
+		"_meta": map[string]any{"steering": map[string]any{"idleBehavior": "promptRequired"}},
+	})
+	if err != nil {
+		return formatACPError("steer", err)
+	}
+	var reply struct {
+		Outcome string `json:"outcome"`
+	}
+	_ = json.Unmarshal(raw, &reply)
+	switch reply.Outcome {
+	case "injected":
+		return nil
+	case "promptRequired":
+		return errors.New("steer: no turn is running")
+	default:
+		return fmt.Errorf("steer: %s answered %q", s.Agent, reply.Outcome)
+	}
 }
 
 // Close ends the session and reaps the adapter process.
@@ -369,8 +471,9 @@ func (s *Session) Permissions() <-chan *PermissionRequest {
 	return s.permissions
 }
 
+// Stderr is the end of the adapter's stderr, as plain text.
 func (s *Session) Stderr() string {
-	return strings.TrimSpace(s.stderr.String())
+	return strings.TrimSpace(plain(s.stderr.String()))
 }
 
 func (s *Session) ExitError() error {
@@ -379,17 +482,70 @@ func (s *Session) ExitError() error {
 	return s.exitErr
 }
 
+// exited is the error for a session whose adapter ended: how it exited, and
+// the end of its stderr, which usually says why.
+func (s *Session) exited() error {
+	text := s.Agent + " adapter exited"
+	if err := s.ExitError(); err != nil {
+		text += " (" + err.Error() + ")"
+	}
+	if stderr := s.Stderr(); stderr != "" {
+		text += stderrLabel + stderr
+	}
+	return errors.New(text)
+}
+
+// stderrLabel introduces the adapter's stderr in an error.
+const stderrLabel = "; agent stderr: "
+
+// limitNotice returns codex-acp's report of a context or rate limit as an
+// error: it sends the report as a message and ends the turn as usual.
+func (s *Session) limitNotice() error {
+	s.mu.Lock()
+	notice := strings.TrimSpace(s.notice)
+	s.mu.Unlock()
+	if s.Agent != "codex" || len(notice) > 500 || !limitError.MatchString(notice) {
+		return nil
+	}
+	return errors.New(notice)
+}
+
+// stderrTail bounds the adapter stderr a session keeps: it grows for the
+// session's whole life, and only its end explains a failure.
+const stderrTail = 2000
+
+type tailBuffer struct {
+	mu   sync.Mutex
+	tail []byte
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.tail = append(b.tail, p...)
+	if extra := len(b.tail) - stderrTail; extra > 0 {
+		b.tail = append(b.tail[:0], b.tail[extra:]...)
+	}
+	return len(p), nil
+}
+
+func (b *tailBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.tail)
+}
+
 func (s *Session) emit(event Event) {
 	if event.SessionID == "" {
 		event.SessionID = s.ID
 	}
 	if event.Tool != nil && event.Tool.Kind != "" {
-		s.kindMu.Lock()
+		s.mu.Lock()
 		if s.kinds == nil {
 			s.kinds = map[string]string{}
 		}
 		s.kinds[event.Tool.ID] = event.Tool.Kind
-		s.kindMu.Unlock()
+		s.mu.Unlock()
 	}
 	select {
 	case s.events <- event:
@@ -400,7 +556,7 @@ func (s *Session) emit(event Event) {
 func (s *Session) wrapError(stage string, err error) error {
 	message := formatACPError(stage, err)
 	if stderr := s.Stderr(); stderr != "" {
-		return fmt.Errorf("%w; agent stderr: %s", message, truncate(stderr, 2000))
+		return fmt.Errorf("%w"+stderrLabel+"%s", message, stderr)
 	}
 	return message
 }
@@ -412,9 +568,35 @@ type sessionClient struct {
 var _ acp.Client = (*sessionClient)(nil)
 
 func (c *sessionClient) SessionUpdate(ctx context.Context, params acp.SessionNotification) error {
+	// codex-acp names where a move goes only in the started call's diff, not
+	// in the permission request for it.
+	var call acp.ToolCallUpdate
+	if u := params.Update.ToolCall; u != nil {
+		call = acp.ToolCallUpdate{ToolCallId: u.ToolCallId, Locations: u.Locations, Content: u.Content, RawInput: u.RawInput}
+	} else if u := params.Update.ToolCallUpdate; u != nil {
+		call = acp.ToolCallUpdate{ToolCallId: u.ToolCallId, Locations: u.Locations, Content: u.Content, RawInput: u.RawInput}
+	}
+	if names := toolNames(call); len(names) > 0 {
+		c.session.mu.Lock()
+		if c.session.named == nil {
+			c.session.named = map[string][]string{}
+		}
+		id := string(call.ToolCallId)
+		c.session.named[id] = append(c.session.named[id], names...)
+		c.session.mu.Unlock()
+	}
 	event, ok := normalizeUpdate(params)
 	if !ok {
 		return nil
+	}
+	if chunk := params.Update.AgentMessageChunk; chunk != nil {
+		notice := ""
+		if chunk.MessageId == nil { // the adapter's own notices; the model's words carry an ID
+			notice = event.Text
+		}
+		c.session.mu.Lock()
+		c.session.notice = notice
+		c.session.mu.Unlock()
 	}
 	c.session.emit(event)
 	return nil
@@ -425,29 +607,26 @@ func (c *sessionClient) RequestPermission(ctx context.Context, params acp.Reques
 	if params.ToolCall.Title != nil && *params.ToolCall.Title != "" {
 		title = *params.ToolCall.Title
 	}
+	title = oneLine(title)
 	request := &PermissionRequest{
 		SessionID:  string(params.SessionId),
 		ToolCallID: string(params.ToolCall.ToolCallId),
 		Title:      title,
 		response:   make(chan PermissionDecision, 1),
 	}
+	c.session.mu.Lock()
+	names := append(toolNames(params.ToolCall), c.session.named[request.ToolCallID]...)
 	if params.ToolCall.Kind != nil {
 		request.Kind = string(*params.ToolCall.Kind)
 	} else {
-		c.session.kindMu.Lock()
 		request.Kind = c.session.kinds[request.ToolCallID]
-		c.session.kindMu.Unlock()
 	}
+	c.session.mu.Unlock()
+	request.Paths, request.Inside = checkPaths(c.session.Cwd, names)
 	if detail := toolDetail(params.ToolCall.RawInput, params.ToolCall.Locations); detail != "" && detail != title {
 		request.Title = title + " " + detail
 	}
-	for _, option := range params.Options {
-		request.Options = append(request.Options, PermissionOption{
-			ID:   string(option.OptionId),
-			Name: option.Name,
-			Kind: string(option.Kind),
-		})
-	}
+	request.Options = permissionOptions(params.Options)
 
 	select {
 	case c.session.permissions <- request:
@@ -466,10 +645,20 @@ func (c *sessionClient) RequestPermission(ctx context.Context, params acp.Reques
 			Outcome: acp.NewRequestPermissionOutcomeSelected(acp.PermissionOptionId(decision.OptionID)),
 		}, nil
 	case <-ctx.Done():
+		request.Cancel() // Withdrawn: the prompt shown for it can go
 		return cancelledPermission(), nil
 	case <-c.session.done:
+		request.Cancel()
 		return cancelledPermission(), nil
 	}
+}
+
+func permissionOptions(options []acp.PermissionOption) []PermissionOption {
+	var out []PermissionOption
+	for _, option := range options {
+		out = append(out, PermissionOption{ID: string(option.OptionId), Name: oneLine(option.Name), Kind: string(option.Kind)})
+	}
+	return out
 }
 
 func cancelledPermission() acp.RequestPermissionResponse {
@@ -521,7 +710,7 @@ func normalizeUpdate(params acp.SessionNotification) (Event, bool) {
 		event.Type = EventToolCall
 		event.Tool = &ToolInfo{
 			ID:     string(u.ToolCall.ToolCallId),
-			Title:  u.ToolCall.Title,
+			Title:  oneLine(u.ToolCall.Title),
 			Status: string(u.ToolCall.Status),
 			Kind:   string(u.ToolCall.Kind),
 			Detail: toolDetail(u.ToolCall.RawInput, u.ToolCall.Locations),
@@ -531,7 +720,7 @@ func normalizeUpdate(params acp.SessionNotification) (Event, bool) {
 		event.Type = EventToolEdit
 		tool := &ToolInfo{ID: string(u.ToolCallUpdate.ToolCallId)}
 		if u.ToolCallUpdate.Title != nil {
-			tool.Title = *u.ToolCallUpdate.Title
+			tool.Title = oneLine(*u.ToolCallUpdate.Title)
 		}
 		if u.ToolCallUpdate.Status != nil {
 			tool.Status = string(*u.ToolCallUpdate.Status)
@@ -546,7 +735,7 @@ func normalizeUpdate(params acp.SessionNotification) (Event, bool) {
 		event.Type = EventPlan
 		for _, entry := range u.Plan.Entries {
 			event.Plan = append(event.Plan, PlanEntry{
-				Content:  entry.Content,
+				Content:  oneLine(entry.Content),
 				Status:   string(entry.Status),
 				Priority: string(entry.Priority),
 			})

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
 )
 
@@ -17,7 +18,7 @@ func Run(args []string) int {
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
-	agent := fs.String("agent", "opencode", "agent adapter: opencode, codex, claude, openclaw, or custom")
+	agent := fs.String("agent", "opencode", "agent adapter: opencode, codex, claude, openclaw, a configured driver, or custom")
 	command := fs.String("command", "", "custom adapter command (for example: \"my-agent acp\")")
 	cwd := fs.String("cwd", ".", "working directory for the agent session")
 	prompt := fs.String("prompt", "Reply with exactly: switch probe ok", "prompt to send")
@@ -34,6 +35,10 @@ func Run(args []string) int {
 
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	// Loading the config adds the drivers it defines.
+	if _, err := config.Load(*cwd); err != nil {
+		fmt.Fprintf(os.Stderr, "probe: %v (configured drivers are unavailable)\n", err)
 	}
 
 	if *list {

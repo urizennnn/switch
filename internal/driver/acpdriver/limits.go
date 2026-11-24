@@ -19,9 +19,14 @@ func LimitReason(stopReason string, err error) string {
 	case "max_turn_requests":
 		return "it reached its request limit for one turn"
 	}
-	if err != nil && limitError.MatchString(err.Error()) {
-		line, _, _ := strings.Cut(err.Error(), "\n")
-		return line
+	if err != nil {
+		// Adapter stderr, appended to some errors, is no provider report: a
+		// stack frame at line 429 is not a rate limit.
+		text, _, _ := strings.Cut(err.Error(), stderrLabel)
+		if limitError.MatchString(text) {
+			line, _, _ := strings.Cut(text, "\n")
+			return line
+		}
 	}
 	return ""
 }

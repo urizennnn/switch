@@ -64,8 +64,9 @@ func Open(ctx context.Context, opts Options) (*Chat, Status, error) {
 	if err != nil {
 		return nil, Status{}, fmt.Errorf("load chat session: %w", err)
 	}
+	stored.Agent = acpdriver.DriverName(stored.Agent) // older builds stored it as configured, such as claude-code
 
-	agent := strings.TrimSpace(opts.Agent)
+	agent := acpdriver.DriverName(opts.Agent)
 	if agent == "" && hasStored && !opts.New {
 		agent = stored.Agent
 	}

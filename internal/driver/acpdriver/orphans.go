@@ -101,6 +101,9 @@ func runsCommand(pid int, command []string) bool {
 	}
 	line := strings.TrimSpace(string(out))
 	program := filepath.Base(command[0])
+	if program == npxBinary {
+		program = "npm exec" // npm retitles npx as "npm exec <package>"
+	}
 	return line != "" && strings.Contains(line, program) &&
 		(len(command) < 2 || strings.Contains(line, command[len(command)-1]))
 }

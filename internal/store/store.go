@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 type Store struct {
@@ -82,12 +84,25 @@ type Task struct {
 
 func Open(path string) (*Store, error) {
 	if path != ":memory:" {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, err
 		}
+		file, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		file.Close()
+		// Transcripts and plans are private, also where an older build or
+		// another part of Switch created these first. Best effort: some
+		// filesystems have no modes.
+		_ = os.Chmod(dir, 0o700)
+		_ = os.Chmod(path, 0o600)
 	}
 
-	db, err := sql.Open("sqlite", path)
+	// The timeout is set on every connection before anything else, so one
+	// process waits for another's lock instead of failing.
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
 	}
@@ -106,9 +121,20 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) migrate() error {
+	// Switching to WAL returns SQLITE_BUSY without waiting while another
+	// process sets up the same new database, so it is retried.
+	var err error
+	for range 100 {
+		var busy *sqlite.Error
+		if _, err = s.db.Exec(`PRAGMA journal_mode = WAL;`); !errors.As(err, &busy) || busy.Code()&0xff != sqlite3.SQLITE_BUSY {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
 	statements := []string{
-		`PRAGMA journal_mode = WAL;`,
-		`PRAGMA busy_timeout = 5000;`,
 		`CREATE TABLE IF NOT EXISTS chat_sessions (
 			project_path TEXT PRIMARY KEY,
 			agent TEXT NOT NULL,
@@ -315,8 +341,41 @@ func (s *Store) TrustedRules(ctx context.Context, project string) (string, error
 	return hash, err
 }
 
+// execer runs a statement on the database or inside a transaction.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 func (s *Store) CreateRun(ctx context.Context, run Run) error {
-	_, err := s.db.ExecContext(ctx, `
+	return createRun(ctx, s.db, run)
+}
+
+// CreatePlannedRun saves a new run with its agents and tasks in one
+// transaction, so a failure part way leaves no half-made run behind.
+func (s *Store) CreatePlannedRun(ctx context.Context, run Run, agents []RunAgent, tasks []Task) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := createRun(ctx, tx, run); err != nil {
+		return err
+	}
+	for _, agent := range agents {
+		if err := saveRunAgent(ctx, tx, agent); err != nil {
+			return fmt.Errorf("agent %s: %w", agent.Name, err)
+		}
+	}
+	for _, task := range tasks {
+		if err := saveTask(ctx, tx, task); err != nil {
+			return fmt.Errorf("task %s: %w", task.ID, err)
+		}
+	}
+	return tx.Commit()
+}
+
+func createRun(ctx context.Context, db execer, run Run) error {
+	_, err := db.ExecContext(ctx, `
 		INSERT INTO runs(id, project, goal, base_ref, integration_branch, integration_path, status, created_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.ID, run.Project, run.Goal, run.BaseRef, run.IntegrationBranch, run.IntegrationPath, run.Status,
@@ -359,8 +418,66 @@ func (s *Store) LatestRun(ctx context.Context, project string) (Run, bool, error
 	return run, true, nil
 }
 
+// ResolveRun returns the ID of the run that id names, in full or as a unique
+// prefix such as the short IDs Switch prints, among the project's runs.
+func (s *Store) ResolveRun(ctx context.Context, project, id string) (string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id FROM runs WHERE substr(id, 1, length(?1)) = ?1 AND project = ?2
+		ORDER BY id = ?1 DESC LIMIT 2`, id, project)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var match string
+		if err := rows.Scan(&match); err != nil {
+			return "", err
+		}
+		ids = append(ids, match)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	switch {
+	case len(ids) == 0:
+		return "", fmt.Errorf("no run %q", id)
+	case len(ids) == 1 || ids[0] == id:
+		return ids[0], nil
+	default:
+		return "", fmt.Errorf("run %q is ambiguous; give more of its ID", id)
+	}
+}
+
+// Runs lists a project's runs, newest first.
+func (s *Store) Runs(ctx context.Context, project string) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, project, goal, base_ref, integration_branch, integration_path, status, created_at
+		FROM runs WHERE project = ?
+		ORDER BY created_at DESC, rowid DESC`, project)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []Run
+	for rows.Next() {
+		var run Run
+		var created string
+		if err := rows.Scan(&run.ID, &run.Project, &run.Goal, &run.BaseRef, &run.IntegrationBranch, &run.IntegrationPath, &run.Status, &created); err != nil {
+			return nil, err
+		}
+		run.CreatedAt, _ = time.Parse(time.RFC3339, created)
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
 func (s *Store) SaveRunAgent(ctx context.Context, agent RunAgent) error {
-	_, err := s.db.ExecContext(ctx, `
+	return saveRunAgent(ctx, s.db, agent)
+}
+
+func saveRunAgent(ctx context.Context, db execer, agent RunAgent) error {
+	_, err := db.ExecContext(ctx, `
 		INSERT INTO run_agents(id, run_id, name, role, driver, model, worktree, branch, session_id, status, created_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -402,12 +519,16 @@ func (s *Store) RunAgents(ctx context.Context, runID string) ([]RunAgent, error)
 }
 
 func (s *Store) SaveTask(ctx context.Context, task Task) error {
+	return saveTask(ctx, s.db, task)
+}
+
+func saveTask(ctx context.Context, db execer, task Task) error {
 	deps, _ := json.Marshal(task.Deps)
 	files, _ := json.Marshal(task.Files)
 	acceptance, _ := json.Marshal(task.Acceptance)
 	verify, _ := json.Marshal(task.Verify)
 
-	_, err := s.db.ExecContext(ctx, `
+	_, err := db.ExecContext(ctx, `
 		INSERT INTO tasks(id, run_id, title, brief, role, deps_json, files_json, acceptance_json,
 			verify_json, status, assignee, branch, worktree, attempts, session_id, commit_sha,
 			feedback, review, last_error, summary, created_at)

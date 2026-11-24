@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -29,14 +30,23 @@ type rulesManager struct {
 	err    string
 }
 
-// rulesReview shows a project's rules the first time they would be sent, since
-// they come from the repository rather than from the user.
+// rulesReview shows a project's rules before they are first sent, and again
+// whenever they change, since they come from the repository rather than from
+// the user.
 type rulesReview struct {
 	text   string
-	warned bool // an enter came with a message typed, so it was not taken as yes
+	hash   string // what enter accepts: the rules shown, not a later read
+	warned bool   // an enter came with a message typed, so it was not taken as yes
 }
 
-type editedMsg struct{ err error }
+// editedMsg ends an edit of path through /rules. before holds the project's
+// rules from before it if the user had accepted them, so the edit can count
+// as accepting them when path is the only file that changed.
+type editedMsg struct {
+	err    error
+	path   string
+	before *rules.Set
+}
 
 var ruleTabs = [2]string{"global", "project"}
 
@@ -101,19 +111,29 @@ func (m model) editRules(path string) tea.Cmd {
 	if err != nil {
 		return func() tea.Msg { return editedMsg{err: err} }
 	}
-	return tea.ExecProcess(editor, func(err error) tea.Msg { return editedMsg{err: err} })
+	var before *rules.Set
+	if project, err := rules.Project(m.rules); err == nil && m.accepted(project.Hash()) {
+		before = &project
+	}
+	return tea.ExecProcess(editor, func(err error) tea.Msg { return editedMsg{err: err, path: path, before: before} })
 }
 
-// handleEdited reloads the rules after the editor closes. The chat rereads
-// them on its next message and sends them again only if they changed.
+// handleEdited reloads the rules after the editor closes. An edit that worked
+// counts as accepting the project's rules if they were accepted before it and
+// no other rule file changed meanwhile; otherwise the review shows them. The
+// chat rereads them on its next message and sends them again only if they
+// changed.
 func (m model) handleEdited(msg editedMsg) (tea.Model, tea.Cmd) {
 	if next, err := m.rules.Reload(); err == nil {
 		m.rules = next
 	} else if msg.err == nil {
 		msg.err = err
 	}
-	if !m.rulesDeclined {
-		m.trustProjectRules() // the user just wrote them
+	if msg.err == nil && msg.before != nil && !m.rulesDeclined {
+		if project, err := rules.Project(m.rules); err == nil && onlyEdited(*msg.before, project, msg.path) {
+			m.trustRules(project.Hash()) // the user just wrote them
+			m.rulesReview = nil          // opened by a check while the editor ran
+		}
 	}
 	if r := m.rulesManager; r != nil {
 		r.files[0], r.files[1] = m.rules.Files()
@@ -126,6 +146,13 @@ func (m model) handleEdited(msg editedMsg) (tea.Model, tea.Cmd) {
 		m.fail("editor failed", msg.err.Error())
 	}
 	return m, nil
+}
+
+// onlyEdited reports whether path is the only project rule file that differs
+// from before, so an edit accepts nothing the user did not write.
+func onlyEdited(before, after rules.Set, path string) bool {
+	edited := func(source rules.Source) bool { return source.Path == path }
+	return slices.Equal(slices.DeleteFunc(slices.Clone(before.Sources), edited), slices.DeleteFunc(slices.Clone(after.Sources), edited))
 }
 
 func (m model) rulesManagerContent(width int) string {
@@ -216,36 +243,51 @@ func (m *model) previewRules(name string) {
 	}
 }
 
-// reviewRules asks once about project rules the user has not seen, before
-// they are sent to any agent.
+// reviewRules shows project rules the user has not accepted, at launch and
+// (on the dashboard tick) whenever they change. Until then the rules set
+// leaves them out of everything sent (rules.Set.Trust).
 func (m *model) reviewRules() {
-	if m.store == nil || m.project == "" {
+	if m.store == nil || m.project == "" || m.rulesDeclined || m.rulesReview != nil {
 		return
 	}
 	project, err := rules.Project(m.rules)
-	if err != nil || project.Empty() {
+	if err != nil || m.accepted(project.Hash()) {
 		return
+	}
+	m.rulesReview = &rulesReview{text: project.Text(), hash: project.Hash()}
+	m.modalTop = 0
+}
+
+// accepted reports whether hash is the project rules the user accepted. No
+// project rules need no answer; a failed lookup counts as no.
+func (m *model) accepted(hash string) bool {
+	if hash == "" {
+		return true
+	}
+	if m.store == nil {
+		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	trusted, err := m.store.TrustedRules(ctx, m.project)
-	if err != nil || trusted == project.Hash() {
-		return
-	}
-	m.rulesReview = &rulesReview{text: project.Text()}
+	return err == nil && trusted == hash
 }
 
-func (m *model) trustProjectRules() {
-	project, err := rules.Project(m.rules)
-	if err != nil || m.store == nil {
+func (m *model) trustRules(hash string) {
+	if m.store == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_ = m.store.SetTrustedRules(ctx, m.project, project.Hash())
+	if err := m.store.SetTrustedRules(ctx, m.project, hash); err != nil {
+		m.fail("could not save your answer", err.Error()+"\nproject rules stay out until you accept them")
+	}
 }
 
 func (m model) handleRulesReviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.permission != nil {
+		return m.handlePermissionKey(msg) // drawn over the review, so answered first
+	}
 	// The panel opens at launch, so keys typed before the user sees it go to
 	// the input, and the enter ending such a message does not accept rules
 	// the user has not read.
@@ -256,7 +298,7 @@ func (m model) handleRulesReviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.notify("your message is kept", "read the project rules first: enter uses them, esc skips them")
 			return m, nil
 		}
-		m.trustProjectRules()
+		m.trustRules(m.rulesReview.hash)
 		m.rulesReview = nil
 	case "esc":
 		m.rulesDeclined = true

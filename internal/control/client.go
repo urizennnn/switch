@@ -2,18 +2,26 @@ package control
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
 
 // Call sends one request to the control socket and returns its result.
 func Call(socket, token, method string, params any) (any, error) {
+	return call(context.Background(), socket, token, method, params)
+}
+
+// call is Call until ctx ends, which closes the connection.
+func call(ctx context.Context, socket, token, method string, params any) (any, error) {
 	if socket == "" || token == "" {
 		return nil, fmt.Errorf("%s and %s are not set; this only works inside a Switch agent session", EnvSocket, EnvToken)
 	}
@@ -22,9 +30,11 @@ func Call(socket, token, method string, params any) (any, error) {
 		return nil, fmt.Errorf("control socket: %w", err)
 	}
 	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
 	deadline := 30 * time.Second
-	if method == "ask" || method == "wait" {
-		deadline = askTimeout + time.Minute
+	if method == "ask" || method == "wait" || method == "question" {
+		deadline = waitBudget + 30*time.Second
 	}
 	_ = conn.SetDeadline(time.Now().Add(deadline))
 
@@ -49,15 +59,19 @@ func Call(socket, token, method string, params any) (any, error) {
 	return resp.Result, nil
 }
 
-// RunAgentCLI is `switch __control agent <method> [message]`, for agents that
-// prefer a shell command to MCP tools.
+// RunAgentCLI is `switch __control agent <method> [message | JSON arguments]`,
+// for agents that prefer a shell command to MCP tools.
 func RunAgentCLI(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: switch __control agent <whoami|team|task|limits|progress|complete|block|report|handoff> [message]\n       switch __control agent ask <teammate> <message>")
+		fmt.Fprint(stderr, agentUsage())
 		return 2
 	}
-	params := map[string]string{"message": strings.Join(args[1:], " ")}
-	if args[0] == "ask" && len(args) > 1 {
+	text := strings.TrimSpace(strings.Join(args[1:], " "))
+	var params any = map[string]string{"message": text}
+	switch {
+	case toolArguments(args[0], text):
+		params = json.RawMessage(text)
+	case args[0] == "ask" && len(args) > 1:
 		params = map[string]string{"to": args[1], "message": strings.Join(args[2:], " ")}
 	}
 	result, err := Call(os.Getenv(EnvSocket), os.Getenv(EnvToken), args[0], params)
@@ -73,4 +87,35 @@ func RunAgentCLI(args []string, stdout, stderr io.Writer) int {
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(result)
 	return 0
+}
+
+// toolArguments reports whether text is a JSON object that names an argument
+// of method's MCP tool, rather than a message that happens to be JSON.
+func toolArguments(method, text string) bool {
+	var fields map[string]json.RawMessage
+	i := slices.IndexFunc(tools, func(t tool) bool { return t.method == method })
+	if i < 0 || json.Unmarshal([]byte(text), &fields) != nil {
+		return false
+	}
+	properties, _ := tools[i].InputSchema["properties"].(map[string]any)
+	for name := range fields {
+		if properties[name] != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// agentUsage lists each method with the arguments of its MCP tool.
+func agentUsage() string {
+	var b strings.Builder
+	b.WriteString("usage: switch __control agent <method> [message]\n" +
+		"       switch __control agent <method> '<JSON object of arguments>'\n" +
+		"       switch __control agent ask <teammate> <message>\n\nmethods and their arguments:\n  whoami\n")
+	for _, t := range tools {
+		properties, _ := t.InputSchema["properties"].(map[string]any)
+		line := fmt.Sprintf("  %-10s %s", t.method, strings.Join(slices.Sorted(maps.Keys(properties)), ", "))
+		b.WriteString(strings.TrimRight(line, " ") + "\n")
+	}
+	return b.String()
 }

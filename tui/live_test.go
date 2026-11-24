@@ -81,8 +81,8 @@ func TestTeammateLiveViewAndPermissions(t *testing.T) {
 		t.Fatal("agent still busy after its turn ended")
 	}
 
-	// Reads go ahead; anything else is the user's call.
-	read := &acpdriver.PermissionRequest{Kind: "read", Options: []acpdriver.PermissionOption{{ID: "ok", Kind: "allow_once"}}}
+	// Reads in its folder go ahead; anything else is the user's call.
+	read := &acpdriver.PermissionRequest{Kind: "read", Inside: true, Options: []acpdriver.PermissionOption{{ID: "ok", Kind: "allow_once"}}}
 	m.team.permit("builder-1")(read)
 	if read.Agent != "builder-1" {
 		t.Fatal("permission not labelled with its agent")

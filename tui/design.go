@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Design tokens. Every view uses these values so the product keeps one visual
@@ -75,16 +76,20 @@ func commandRow(label, description string) string {
 }
 
 func panel(width, height int, title, content string) string {
+	inner := max(10, width) - 4 // inside the border and padding
 	head := ""
 	if strings.TrimSpace(title) != "" {
-		head = titleStyle.Render(strings.ToUpper(title)) + "\n"
+		// One row: the views size their content to the rows under it.
+		head = titleStyle.Render(ansi.Truncate(strings.ToUpper(title), inner, "…")) + "\n"
 	}
-	// Height is only a minimum; clip to the rows inside the border so long
-	// content cannot push this panel taller than its neighbour.
+	// Height is only a minimum; wrap at words (as lipgloss would), then clip
+	// to the rows inside the border, so long content cannot push this panel
+	// taller than its neighbour.
+	content = head + ansi.Wrap(strings.TrimRight(content, "\n"), inner, "")
 	return panelStyle.
 		Width(max(10, width)).
 		Height(max(3, height)).
-		Render(truncateLines(head+strings.TrimRight(content, "\n"), max(1, height-2)))
+		Render(truncateLines(content, max(1, height-2)))
 }
 
 func inputBar(width int, value string) string {

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -23,19 +24,30 @@ type Result struct {
 	Output   string // combined stdout and stderr
 	Duration time.Duration
 	TimedOut bool
+	Flaky    bool // passed on a rerun; the result before it is the failure
 }
 
 func (r Result) Passed() bool { return r.ExitCode == 0 && !r.TimedOut }
 
 // Run executes each command with `sh -c` in dir, in order, stopping at the
-// first failure. No commands means nothing to check, which passes.
-func Run(ctx context.Context, dir string, commands []string, timeout time.Duration) ([]Result, bool) {
+// first failure. env adds to the commands' environment. A command that fails
+// runs once more before it counts, since flaky tests fail now and then, and
+// both results are kept. reset, unless nil, first undoes what the failed run
+// wrote, so the rerun cannot pass on that; if it fails, there is no rerun. A
+// timeout is not rerun, as it would only take as long again. No commands
+// means nothing to check, which passes.
+func Run(ctx context.Context, dir string, commands []string, timeout time.Duration, reset func() error, env ...string) ([]Result, bool) {
 	var results []Result
 	for _, command := range commands {
 		if strings.TrimSpace(command) == "" {
 			continue
 		}
-		result := runOne(ctx, dir, command, timeout)
+		result := runOne(ctx, dir, command, timeout, env)
+		if !result.Passed() && !result.TimedOut && ctx.Err() == nil && (reset == nil || reset() == nil) {
+			results = append(results, result) // the failure is evidence too
+			result = runOne(ctx, dir, command, timeout, env)
+			result.Flaky = result.Passed()
+		}
 		results = append(results, result)
 		if !result.Passed() {
 			return results, false
@@ -44,12 +56,13 @@ func Run(ctx context.Context, dir string, commands []string, timeout time.Durati
 	return results, true
 }
 
-func runOne(ctx context.Context, dir, command string, timeout time.Duration) Result {
+func runOne(ctx context.Context, dir, command string, timeout time.Duration, env []string) Result {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(runCtx, "sh", "-c", command)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
 	configureProcess(cmd)
 	var output bytes.Buffer
 	cmd.Stdout = &output
@@ -91,6 +104,8 @@ func Summary(results []Result) string {
 	for _, r := range results {
 		status := "passed"
 		switch {
+		case r.Flaky:
+			status = "passed on a rerun (flaky)"
 		case r.TimedOut:
 			status = "timed out"
 		case r.ExitCode != 0:

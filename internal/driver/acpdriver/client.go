@@ -218,6 +218,7 @@ func (c *probeClient) RequestPermission(ctx context.Context, params acp.RequestP
 	if params.ToolCall.Title != nil && *params.ToolCall.Title != "" {
 		title = *params.ToolCall.Title
 	}
+	title = oneLine(title)
 
 	options := make([]map[string]any, 0, len(params.Options))
 	for _, option := range params.Options {
@@ -235,37 +236,36 @@ func (c *probeClient) RequestPermission(ctx context.Context, params acp.RequestP
 		"tool":    string(params.ToolCall.ToolCallId),
 	})
 
-	option, decision, ok := c.choosePermission(title, params.Options)
+	option, ok := c.choosePermission(title, permissionOptions(params.Options))
+	decision := "cancel"
+	if ok {
+		decision = option.Kind
+	}
 	c.emitSession(params.SessionId, map[string]any{
 		"type":     "permission_decision",
 		"tool":     string(params.ToolCall.ToolCallId),
 		"decision": decision,
 	})
 	if !ok {
-		return acp.RequestPermissionResponse{
-			Outcome: acp.NewRequestPermissionOutcomeCancelled(),
-		}, nil
+		return cancelledPermission(), nil
 	}
-	return selected(option), nil
+	return acp.RequestPermissionResponse{
+		Outcome: acp.NewRequestPermissionOutcomeSelected(acp.PermissionOptionId(option.ID)),
+	}, nil
 }
 
-// choosePermission returns the exact option to select, a human-readable
-// decision label, and whether an option was selected. A false third return
-// means the request should be cancelled.
-func (c *probeClient) choosePermission(title string, options []acp.PermissionOption) (acp.PermissionOption, string, bool) {
+// choosePermission returns the exact option to select and whether one was
+// selected; when none is, the request should be cancelled. Its own answers
+// are pick's, as for any request Switch answers without asking.
+func (c *probeClient) choosePermission(title string, options []PermissionOption) (PermissionOption, bool) {
 	switch c.permission {
-	case PermissionAllow:
-		return firstOption(options, acp.PermissionOptionKindAllowOnce,
-			acp.PermissionOptionKindAllowAlways)
-	case PermissionDeny:
-		return firstOption(options, acp.PermissionOptionKindRejectOnce,
-			acp.PermissionOptionKindRejectAlways)
+	case PermissionAllow, PermissionDeny:
+		return pick(options, c.permission)
 	}
 
 	if !c.isTTY {
 		c.human("\n[permission] %s: no TTY, denying\n", title)
-		return firstOption(options, acp.PermissionOptionKindRejectOnce,
-			acp.PermissionOptionKindRejectAlways)
+		return pick(options, PermissionDeny)
 	}
 
 	c.mu.Lock()
@@ -278,63 +278,27 @@ func (c *probeClient) choosePermission(title string, options []acp.PermissionOpt
 
 	line, err := c.stdin.ReadString('\n')
 	if err != nil {
-		return firstOption(options, acp.PermissionOptionKindRejectOnce,
-			acp.PermissionOptionKindRejectAlways)
+		return pick(options, PermissionDeny)
 	}
 	line = strings.TrimSpace(line)
 	if line == "" {
-		return firstOption(options, acp.PermissionOptionKindRejectOnce,
-			acp.PermissionOptionKindRejectAlways)
+		return pick(options, PermissionDeny)
 	}
 
 	var index int
 	if _, err := fmt.Sscanf(line, "%d", &index); err != nil {
-		return firstOption(options, acp.PermissionOptionKindRejectOnce,
-			acp.PermissionOptionKindRejectAlways)
+		return pick(options, PermissionDeny)
 	}
 	index--
 	if index < 0 || index >= len(options) {
-		return firstOption(options, acp.PermissionOptionKindRejectOnce,
-			acp.PermissionOptionKindRejectAlways)
+		return pick(options, PermissionDeny)
 	}
-	return options[index], string(options[index].Kind), true
-}
-
-func firstOption(options []acp.PermissionOption, kinds ...acp.PermissionOptionKind) (acp.PermissionOption, string, bool) {
-	for _, kind := range kinds {
-		if option, ok := findOption(options, kind); ok {
-			return option, string(kind), true
-		}
-	}
-	for _, option := range options {
-		if strings.HasPrefix(string(option.Kind), "allow") && len(kinds) > 0 && strings.HasPrefix(string(kinds[0]), "allow") {
-			return option, string(option.Kind), true
-		}
-		if strings.HasPrefix(string(option.Kind), "reject") && len(kinds) > 0 && strings.HasPrefix(string(kinds[0]), "reject") {
-			return option, string(option.Kind), true
-		}
-	}
-	return acp.PermissionOption{}, "cancel", false
-}
-
-func selected(option acp.PermissionOption) acp.RequestPermissionResponse {
-	return acp.RequestPermissionResponse{
-		Outcome: acp.NewRequestPermissionOutcomeSelected(option.OptionId),
-	}
-}
-
-func findOption(options []acp.PermissionOption, kind acp.PermissionOptionKind) (acp.PermissionOption, bool) {
-	for _, option := range options {
-		if option.Kind == kind {
-			return option, true
-		}
-	}
-	return acp.PermissionOption{}, false
+	return options[index], true
 }
 
 func contentText(content acp.ContentBlock) string {
 	if content.Text != nil {
-		return content.Text.Text
+		return plain(content.Text.Text)
 	}
 	return ""
 }

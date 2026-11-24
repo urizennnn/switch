@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,9 @@ func TestStatusLineFollowsState(t *testing.T) {
 		{"permission", func(m *model) {
 			m.permission = &acpdriver.PermissionRequest{Title: "edit view.go", Options: make([]acpdriver.PermissionOption, 2)}
 		}, []string{"PERMISSION", "lead asks: edit view.go", "1-2 choose · esc deny"}},
+		{"the lead's permission during a run", func(m *model) {
+			m.job, m.permission = "run", &acpdriver.PermissionRequest{Title: "rm build"}
+		}, []string{"lead asks: rm build"}},
 		{"run", func(m *model) {
 			m.job, m.jobStarted = "run", time.Now().Add(-190*time.Second)
 			m.run = &store.Run{ID: "r1"}
@@ -65,6 +69,63 @@ func TestStatusLineFollowsState(t *testing.T) {
 	if !strings.Contains(narrow, "WORKING") || !strings.Contains(narrow, "esc cancel") || strings.Contains(narrow, "\n") {
 		t.Fatalf("narrow status line: %q", narrow)
 	}
+}
+
+// In the background, Switch rings and notifies when it comes to need the
+// user, and the window title says what waits.
+func TestAttentionWhileInTheBackground(t *testing.T) {
+	m := New(Options{Context: context.Background(), Project: "/p", Lead: config.Agent{Name: "lead", Driver: "opencode"}})
+	defer m.cancel()
+	m.connecting, m.state = false, "ready"
+	if v := m.View(); !v.ReportFocus || v.WindowTitle != "switch" {
+		t.Fatalf("view reports focus %v, title %q", v.ReportFocus, v.WindowTitle)
+	}
+	prompt := func() tea.Msg {
+		return jobPermissionMsg{request: &acpdriver.PermissionRequest{Agent: "builder-1", Title: "rm -rf build\x1b]2;owned\a"}}
+	}
+	if _, cmd := m.Update(prompt()); cmd != nil {
+		t.Fatal("pinged a user who is looking")
+	}
+	next, _ := m.Update(tea.BlurMsg{})
+	away := next.(model)
+	next, cmd := away.Update(prompt())
+	if got := fmt.Sprint(cmd().(tea.RawMsg).Msg); got != "\a\x1b]9;Switch: builder-1 asks: rm -rf build ]2;owned \a" {
+		t.Fatalf("permission ping = %q; an agent's title must not reach the terminal raw", got)
+	}
+	if got := next.(model).windowTitle(); got != "▲ permission · switch" {
+		t.Fatalf("title = %q", got)
+	}
+	if next, _ = away.Update(tea.FocusMsg{}); next.(model).blurred {
+		t.Fatal("focus did not come back")
+	}
+
+	check := func(name string, prev, now model, want string) {
+		t.Helper()
+		got := ""
+		if cmd := now.ping(prev); cmd != nil {
+			got = fmt.Sprint(cmd().(tea.RawMsg).Msg)
+		}
+		if want != "" {
+			want = "\a\x1b]9;Switch: " + want + "\a"
+		}
+		if got != want {
+			t.Errorf("%s: ping %q, want %q", name, got, want)
+		}
+	}
+	review := away
+	review.tasks = []store.Task{{Status: execution.StatusReview}, {Status: execution.StatusReview}}
+	check("review", away, review, "2 tasks ready for review")
+	if got := review.windowTitle(); got != "● 2 to review · switch" {
+		t.Errorf("title = %q", got)
+	}
+	inRun, afterRun := away, away
+	inRun.job, afterRun.run = "run", &store.Run{Status: execution.RunCompleted}
+	check("run end", inRun, afterRun, "the run's work is merged into the integration branch.")
+	long, short := away, away
+	long.busy, long.turnStarted = true, time.Now().Add(-31*time.Second)
+	short.busy, short.turnStarted = true, time.Now().Add(-5*time.Second)
+	check("long turn", long, away, "lead finished")
+	check("short turn", short, away, "")
 }
 
 func TestParseGitStatus(t *testing.T) {

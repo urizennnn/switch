@@ -17,6 +17,17 @@ func TestResolveAdapterOpenCode(t *testing.T) {
 	}
 }
 
+func TestDriverNameIsOneForm(t *testing.T) {
+	for in, want := range map[string]string{" Claude-Code ": "claude", "CLAUDE": "claude", "OpenCode": "opencode", "": ""} {
+		if got := DriverName(in); got != want {
+			t.Errorf("DriverName(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if adapter, err := ResolveAdapter("Claude-Code"); err != nil || adapter.Name != "claude" {
+		t.Fatalf("ResolveAdapter(Claude-Code) = %+v, %v", adapter, err)
+	}
+}
+
 func TestResolveAdapterUnknown(t *testing.T) {
 	if _, err := ResolveAdapter("nope"); err == nil {
 		t.Fatal("expected an error for an unknown adapter")

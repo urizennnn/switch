@@ -9,12 +9,16 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	tea "charm.land/bubbletea/v2"
 	acp "github.com/coder/acp-go-sdk"
 	"github.com/urizennnn/switch/internal/chat"
 	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/control"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
+	"github.com/urizennnn/switch/internal/execution"
+	"github.com/urizennnn/switch/internal/rules"
 	"github.com/urizennnn/switch/internal/store"
 )
 
@@ -36,10 +40,17 @@ type team struct {
 	warming map[string]bool
 	asked   map[string]bool               // answering a switch_ask right now
 	active  map[string]*acpdriver.Session // the session answering, so it can be stopped
+	turns   map[string]context.Context    // the answer under way, which the teammate's questions to the user end with
 	subs    map[string]*chatSub           // subagents of teammates, by worker/name
+	working map[string]bool               // agents whose run task turn is running
+	rules   rules.Set                     // the lead's; each teammate adds its role's and its own
+	engine  *execution.Engine             // the run this Switch drives, whose workers Steer reaches
+	steers  map[string]string             // what Steer could not get into a teammate's answer, for its next prompt
 
 	// Set by the TUI before the team is used.
-	ctx    context.Context
+	base   context.Context                     // sessions run on it, as the lead's do, so quitting can close them gracefully
+	ctx    context.Context                     // under base, for turns, emit and permit
+	stop   context.CancelFunc                  // ends ctx; close calls it first
 	events chan<- streamMsg                    // live views of teammates and their subagents
 	perms  chan<- *acpdriver.PermissionRequest // actions that need the user's answer
 	subCfg config.SubagentConfig
@@ -53,8 +64,8 @@ func newTeam(project string, fleet []config.Agent, lead string) *team {
 	return &team{
 		project: project, fleet: fleet, lead: lead,
 		warm: map[string]*acpdriver.Session{}, warming: map[string]bool{}, asked: map[string]bool{},
-		active: map[string]*acpdriver.Session{}, subs: map[string]*chatSub{}, ctx: context.Background(),
-		usage: map[string]acpdriver.UsageInfo{},
+		active: map[string]*acpdriver.Session{}, turns: map[string]context.Context{}, subs: map[string]*chatSub{}, base: context.Background(), ctx: context.Background(),
+		usage: map[string]acpdriver.UsageInfo{}, steers: map[string]string{},
 	}
 }
 
@@ -67,12 +78,37 @@ func (t *team) listen() {
 			RunID:    hex.EncodeToString(sum[:])[:8],
 			StateDir: config.StateDir(),
 			Team:     t,
+			OnText:   func(agent, text string) { t.emit(agent, acpdriver.Event{Type: acpdriver.EventMessage, Text: text}) },
 		})
 		if err == nil {
 			server.SetSubagents(t)
+			t.mu.Lock() // bindRun reads it on the UI goroutine while the lead connects
 			t.server = server
+			t.mu.Unlock()
 		}
 	})
+}
+
+// bindRun shows the chat's lead the run this Switch drives or watches, nil
+// when nothing drives one, and lets Steer reach the workers of an engine
+// running here.
+func (t *team) bindRun(st *store.Store, run *store.Run, engine *execution.Engine) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.engine = engine
+	server := t.server
+	t.mu.Unlock()
+	switch {
+	case server == nil: // another Switch serves this project's chat
+	case run == nil:
+		server.Bind(nil, "", nil)
+	case engine == nil: // detached: its engine polls the store
+		server.Bind(st, run.ID, nil)
+	default:
+		server.Bind(st, run.ID, engine.Wake)
+	}
 }
 
 // grant gives an agent's session its team tools: the MCP bridge and the env
@@ -117,7 +153,7 @@ func (t *team) toWarm() []config.Agent {
 	defer t.mu.Unlock()
 	var out []config.Agent
 	for _, agent := range t.fleet {
-		if agent.Name == t.lead || t.warm[agent.Name] != nil || t.warming[agent.Name] || !adapterAvailable(agent.Driver) {
+		if agent.Name == t.lead || live(t.warm[agent.Name]) || t.warming[agent.Name] || !adapterAvailable(agent.Driver) {
 			continue
 		}
 		t.warming[agent.Name] = true
@@ -127,11 +163,18 @@ func (t *team) toWarm() []config.Agent {
 }
 
 // park keeps a session warm for an agent, closing any session it replaces.
+// One whose adapter has exited is closed instead.
 func (t *team) park(name string, session *acpdriver.Session) {
 	if t == nil || session == nil {
 		return
 	}
 	t.mu.Lock()
+	if !live(session) {
+		delete(t.warming, name)
+		t.mu.Unlock()
+		go session.Close(context.Background())
+		return
+	}
 	old := t.warm[name]
 	t.warm[name] = session
 	delete(t.warming, name)
@@ -159,7 +202,49 @@ func (t *team) take(name string) *acpdriver.Session {
 	defer t.mu.Unlock()
 	session := t.warm[name]
 	delete(t.warm, name)
+	if !live(session) {
+		if session != nil {
+			go session.Close(context.Background())
+		}
+		return nil
+	}
+drain: // what a turn that was handed off or abandoned left behind
+	for {
+		select {
+		case <-session.Events:
+		default:
+			break drain
+		}
+	}
 	return session
+}
+
+// startSession starts a session that outlives ctx, as the request or run that
+// needs it ends long before it does, but gives up if ctx ends first.
+func (t *team) startSession(ctx context.Context, name, driver, model string, grant func(string) ([]acp.McpServer, []string)) (*acpdriver.Session, error) {
+	life, end := context.WithCancel(t.base)
+	abort := context.AfterFunc(ctx, end) // ending life kills the adapter, which ends the start
+	session, err := chat.StartSession(life, t.project, name, driver, model, grant)
+	if !abort() {
+		if err == nil {
+			go session.Close(context.Background())
+		}
+		return nil, ctx.Err()
+	}
+	return session, err
+}
+
+// live reports whether a session is there and its adapter still runs.
+func live(session *acpdriver.Session) bool {
+	if session == nil {
+		return false
+	}
+	select {
+	case <-session.Done():
+		return false
+	default:
+		return true
+	}
 }
 
 func (t *team) status(name string) string {
@@ -173,7 +258,9 @@ func (t *team) status(name string) string {
 		return "leading"
 	case t.asked[name]:
 		return "answering"
-	case t.warm[name] != nil:
+	case t.working[name]:
+		return "working"
+	case live(t.warm[name]):
 		return "ready"
 	case t.warming[name]:
 		return "starting"
@@ -182,8 +269,47 @@ func (t *team) status(name string) string {
 	}
 }
 
+// setRules keeps teammates on the rules the lead has, such as without the
+// project's once the user skips them.
+func (t *team) setRules(set rules.Set) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.rules = set
+	t.mu.Unlock()
+}
+
+// setRunTasks records whose run turn is running, a task's or the run lead's
+// review: asking one would start a second session beside it, streaming into
+// the same live view. The run's lead need not be the chat's.
+func (t *team) setRunTasks(tasks []store.Task, agents []store.RunAgent) {
+	if t == nil {
+		return
+	}
+	working := map[string]bool{}
+	for _, task := range tasks {
+		switch task.Status {
+		case execution.StatusRunning:
+			working[task.Assignee] = true
+		case execution.StatusReviewing:
+			for _, agent := range agents {
+				if agent.Role == "lead" {
+					working[agent.Name] = true
+				}
+			}
+		}
+	}
+	t.mu.Lock()
+	t.working = working
+	t.mu.Unlock()
+}
+
 // close stops every warm session in parallel and the team server.
 func (t *team) close() {
+	if t.stop != nil {
+		t.stop() // frees emit and permit and ends answers in flight, which the server waits for
+	}
 	for _, agent := range t.fleet {
 		t.stopSubs(agent.Name)
 	}
@@ -227,6 +353,9 @@ func (t *team) leadName() string {
 	return t.lead
 }
 
+// Lead implements control.Team, which refuses switch_progress from the lead.
+func (t *team) Lead() string { return t.leadName() }
+
 // Ask implements control.Team for switch_ask: it sends the message to the
 // teammate's session (warm when possible) and returns the reply. A teammate
 // being asked cannot ask others, which keeps consultations from looping.
@@ -249,53 +378,119 @@ func (t *team) Ask(ctx context.Context, from, to, message string) (string, error
 	case t.asked[to]:
 		t.mu.Unlock()
 		return "", fmt.Errorf("%s is answering another question; try again shortly", to)
+	case t.working[to]:
+		t.mu.Unlock()
+		return "", fmt.Errorf("%s is working on a run task; ask again when it finishes", to)
 	}
 	t.asked[to] = true
+	base := t.rules
 	t.mu.Unlock()
 	defer func() {
 		t.mu.Lock()
 		delete(t.asked, to)
 		t.mu.Unlock()
 	}()
+	set, err := rules.Scoped(base, agent.Role, agent.Name, "")
+	if err != nil {
+		return "", fmt.Errorf("%s's rules: %w", to, err)
+	}
 
+	// The answer, a start included, ends before the control server gives up
+	// on it, or when Switch quits.
+	turnCtx, cancel := context.WithTimeout(ctx, 9*time.Minute)
+	defer cancel()
+	defer context.AfterFunc(t.ctx, cancel)()
 	session := t.take(to)
 	if session == nil {
-		var err error
-		if session, err = chat.StartSession(ctx, t.project, agent.Name, agent.Driver, agent.Model, t.grant); err != nil {
+		if session, err = t.startSession(turnCtx, agent.Name, agent.Driver, agent.Model, t.grant); err != nil {
 			return "", fmt.Errorf("start %s: %w", to, err)
 		}
+		t.resetUsage(to)
 	}
-	defer t.park(to, session) // stays warm for the next question or a lead switch
 	t.mu.Lock()
-	t.active[to] = session
+	t.active[to], t.turns[to] = session, turnCtx
+	steered := t.steers[to] // taken once there is a session to send it, so a failed start keeps it
+	delete(t.steers, to)
 	t.mu.Unlock()
 	defer func() {
 		t.mu.Lock()
 		delete(t.active, to)
+		delete(t.turns, to)
 		t.mu.Unlock()
 		t.stopSubs(to) // they only serve this answer
 	}()
 
-	prompt := fmt.Sprintf("You are %s (%s) on a Switch team working in %s. Your teammate %s asks:\n\n%s\n\n"+
-		"Answer directly and concisely. Do not edit files; %s decides what happens next.", to, agent.Role, t.project, from, message, from)
+	asker, decider := "Your teammate "+from, from
+	if from == "user" { // an @mention typed in the chat
+		asker, decider = "The user", "the user"
+	}
+	prompt := fmt.Sprintf("You are %s (%s) on a Switch team working in %s. %s asks:\n\n%s\n\n"+
+		"Answer directly and concisely. Do not edit files; %s decides what happens next.", to, agent.Role, t.project, asker, message, decider)
 	if t.subCfg.MaxPerBuilder > 0 {
 		prompt += fmt.Sprintf("\n\nYou can start up to %d read-only subagents with switch_spawn to explore in parallel. "+
 			"Collect their results with switch_wait before you answer; they stop when you answer.", t.subCfg.MaxPerBuilder)
 	}
+	prompt = steered + set.Prompt(prompt)
 	t.emit(to, acpdriver.Event{Type: acpdriver.EventStart, Text: from + " asks: " + message})
-	turnCtx, cancel := context.WithTimeout(ctx, 9*time.Minute)
-	defer cancel()
 	reply, err := session.RunTurn(turnCtx, prompt, acpdriver.TurnOptions{
 		OnEvent:      func(event acpdriver.Event) { t.emit(to, event) },
 		OnPermission: t.permit(to),
 	})
-	if err != nil {
-		t.emit(to, acpdriver.Event{Type: acpdriver.EventError, Err: err})
+	if err != nil && turnCtx.Err() != nil {
+		// Its prompt may still be running, and the next ask would take the end of it as its answer.
+		go session.Close(context.Background())
+	} else {
+		t.park(to, session) // stays warm for the next question or a lead switch
 	}
 	if err != nil {
+		t.emit(to, acpdriver.Event{Type: acpdriver.EventError, Err: err})
 		return "", fmt.Errorf("%s did not answer: %w", to, err)
 	}
 	return strings.TrimSpace(reply), nil
+}
+
+// Steer implements control.Team for /steer and switch_steer: it sends text to
+// a teammate's answer or, through the engine, a worker's turn in the run this
+// Switch drives. A teammate whose adapter cannot take it mid-turn gets it at
+// the start of its next prompt, whatever it is asked: unlike a worker's, its
+// turns serve no task to keep it for. The lead is never steered: the user
+// talks to it.
+func (t *team) Steer(ctx context.Context, to, text string) (string, error) {
+	t.mu.Lock()
+	lead, session, engine := t.lead, t.active[to], t.engine
+	t.mu.Unlock()
+	switch {
+	case to == lead:
+		return "", fmt.Errorf("%s is the lead, talking with the user; it is not steered", to)
+	case session == nil && engine != nil:
+		return engine.Steer(ctx, to, text)
+	case session == nil:
+		return "", fmt.Errorf("%s has no turn running in this Switch", to)
+	}
+	err := session.Steer(ctx, text)
+	if err == nil {
+		return to + " got it in its running turn", nil
+	}
+	t.mu.Lock()
+	t.steers[to] += "Sent to you during your previous turn: " + text + "\n\n"
+	t.mu.Unlock()
+	return fmt.Sprintf("%s could not take it mid-turn (%v), so it gets it at the start of its next prompt", to, err), nil
+}
+
+// Question implements switch_question in the chat: a teammate's question
+// waits among the user's permission prompts for as long as the answer that
+// asked it goes on, as its token outlives that turn.
+func (t *team) Question(ctx context.Context, agent, _, question string, options []string) string {
+	t.mu.Lock()
+	turn := t.turns[agent]
+	t.mu.Unlock()
+	if turn == nil {
+		return "you have no turn running to take the user's answer; decide yourself"
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(turn, cancel)()
+	return execution.AskUser(ctx, t.permit(agent), agent, question, options)
 }
 
 // describe is the team note prepended to the lead's messages, so it knows
@@ -317,6 +512,79 @@ func (t *team) describe(name string) string {
 	return fmt.Sprintf("[Switch] You are %s, the lead of a Switch team. Teammates: %s. "+
 		"These are your team, not your own subagents: consult one with %s (or `$SWITCH_BIN __control agent ask <name> <message>`). "+
 		"The user starts team work with /plan and /run.", name, strings.Join(mates, "; "), tools) + t.limitNote(name)
+}
+
+// askedMsg is a teammate's answer to the user's @mention.
+type askedMsg struct {
+	to, reply string
+	err       error
+	gen       int
+}
+
+// mention splits "@name message" when name is a teammate other than the
+// lead; anything else is a message for the lead.
+func (m model) mention(text string) (to, message string, ok bool) {
+	rest, at := strings.CutPrefix(text, "@")
+	name, message, _ := strings.Cut(rest, " ")
+	agent, found := m.fleetAgent(name)
+	if !at || !found || agent.Name == m.lead.Name {
+		return "", "", false
+	}
+	return agent.Name, strings.TrimSpace(message), true
+}
+
+// askTeammate sends an @mention the way the lead's switch_ask goes, without
+// using the lead's context. Its answer joins the conversation when it comes;
+// tab follows it live meanwhile.
+func (m model) askTeammate(to, question string) (tea.Model, tea.Cmd) {
+	if question == "" {
+		m.notify("ask "+to, "type the question after the name")
+		return m, nil
+	}
+	m.input.Reset()
+	m.home = false
+	m.setFocus("")
+	addAside(&m.entries, entry{kind: entrySystem, text: "you asked " + to + ": " + question})
+	m.refreshViewport()
+	t, ctx, gen := m.team, m.ctx, m.gen
+	return m, func() tea.Msg {
+		reply, err := t.Ask(ctx, "user", to, question)
+		return askedMsg{to: to, reply: reply, err: err, gen: gen}
+	}
+}
+
+// completeMention is tab after a leading @: it completes a teammate's name
+// as far as the names agree, and lists them when that adds nothing.
+func (m *model) completeMention() bool {
+	typed, at := strings.CutPrefix(m.input.Value(), "@")
+	if !at || strings.Contains(typed, " ") {
+		return false
+	}
+	var names []string
+	for _, agent := range m.dashboardFleet() {
+		if agent.Name != m.lead.Name && strings.HasPrefix(agent.Name, typed) {
+			names = append(names, agent.Name)
+		}
+	}
+	if len(names) == 0 {
+		return false
+	}
+	common := names[0]
+	for _, name := range names[1:] {
+		for !strings.HasPrefix(name, common) {
+			_, size := utf8.DecodeLastRuneInString(common)
+			common = common[:len(common)-size]
+		}
+	}
+	switch {
+	case len(names) == 1:
+		common += " "
+	case common == typed:
+		m.notify("teammates", strings.Join(names, " · "))
+	}
+	m.input.SetValue("@" + common)
+	m.input.CursorEnd()
+	return true
 }
 
 // limitNote tells the lead how full its context is, and to hand off once it

@@ -2,12 +2,17 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/execution"
+	"github.com/urizennnn/switch/internal/runcli"
 	"github.com/urizennnn/switch/internal/store"
 )
 
@@ -78,42 +83,184 @@ func (m model) handleTaskPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// taskAction runs an engine operation off the UI goroutine. It reuses the
-// running engine so its scheduler wakes up, or builds a short-lived one.
-func (m model) taskAction(action, taskID, reason string) tea.Cmd {
-	engine := m.engine
-	if engine == nil {
-		var err error
-		engine, err = m.newEngine(m.ctx, nil)
-		if err != nil {
-			return func() tea.Msg { return taskActionMsg{title: action + " failed", body: err.Error()} }
-		}
+// runID is the run's ID, or "" once a failed read of the store has cleared
+// the run, as a dashboard tick can while /fix's shell is open.
+func (m model) runID() string {
+	if m.run == nil {
+		return ""
 	}
-	ctx := m.ctx
+	return m.run.ID
+}
+
+// taskEngine is the running engine, so its scheduler wakes up, or a
+// short-lived one.
+func (m model) taskEngine() (*execution.Engine, error) {
+	if m.engine != nil {
+		return m.engine, nil
+	}
+	return m.newEngine(m.ctx, nil)
+}
+
+// taskAction runs an engine operation off the UI goroutine.
+func (m model) taskAction(action, taskID, reason string) tea.Cmd {
+	engine, err := m.taskEngine()
+	if err != nil {
+		return func() tea.Msg { return taskActionMsg{title: action + " failed", body: err.Error()} }
+	}
+	// No deadline of its own: the engine bounds each setup and verify command
+	// of an approval's integration check by the run's verify timeout.
+	ctx, state, runID := m.ctx, m.store, m.runID()
 	name := shortTaskID(taskID)
+	next := "\n/run continues the run"
+	if m.job == "run" || m.runOwner > 0 {
+		next = "\nthe running run picks it up"
+	}
 	return func() tea.Msg {
-		actionCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
-		defer cancel()
 		var err error
 		body := ""
 		switch action {
 		case "approve":
-			err = engine.Approve(actionCtx, taskID)
-			body = name + " merged into the integration branch"
+			if err = engine.Approve(ctx, taskID); err == nil {
+				body = name + " merged into the integration branch" + prDescription(ctx, state, runID)
+			}
 		case "reject":
-			err = engine.Reject(actionCtx, taskID, reason)
-			body = name + " sent back to its worker\n/run continues the run"
+			err = engine.Reject(ctx, taskID, reason)
+			body = name + " sent back to its worker" + next
 		case "retry":
-			err = engine.Retry(actionCtx, taskID)
-			body = name + " requeued\n/run continues the run"
+			err = engine.Retry(ctx, taskID)
+			body = name + " requeued" + next
+		case "fix":
+			err = engine.Resubmit(ctx, taskID)
+			body = name + " passed its checks and waits for your review\n/approve " + name + " merges it"
 		case "diff":
-			body, err = engine.Diff(actionCtx, taskID)
+			body, err = engine.Diff(ctx, taskID)
+			body = colorDiff(body)
 		}
 		if err != nil {
 			return taskActionMsg{title: action + " " + name + " failed", body: err.Error()}
 		}
 		return taskActionMsg{title: action + " " + name, body: body}
 	}
+}
+
+// fixShellMsg ends the shell /fix opened in a task's worktree.
+type fixShellMsg struct {
+	taskID string
+	err    error
+}
+
+// fixedMsg is the check of what the user changed in that shell.
+type fixedMsg taskActionMsg
+
+// fixTask is /fix: the user's shell in the task's worktree, after which
+// Switch checks what they changed.
+func (m model) fixTask(name string) (tea.Model, tea.Cmd) {
+	m.refreshDashboard() // the shell must not open where an agent works now
+	task, ok := m.findTask(name)
+	if !ok {
+		m.fail("unknown task "+name, "/tasks lists them")
+		return m, nil
+	}
+	switch err := execution.Fixable(task); {
+	case m.fixing != "":
+		m.notify("checking your fix of "+shortTaskID(m.fixing), "wait for its check to finish")
+	case err != nil:
+		m.fail("cannot fix "+name, err.Error())
+	case (task.Status == execution.StatusQueued || task.Status == execution.StatusInterrupted) && (m.job == "run" || m.runOwner > 0):
+		m.notify("run in progress", "it would hand "+name+" to a worker while you work; /stop first")
+	default:
+		return m, tea.ExecProcess(fixShell(task.Worktree, shortTaskID(task.ID)), func(err error) tea.Msg { return fixShellMsg{taskID: task.ID, err: err} })
+	}
+	return m, nil
+}
+
+// fixShell opens the user's shell in dir, after a line on how /fix ends.
+func fixShell(dir, task string) *exec.Cmd {
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	note := "Fixing " + task + " in its worktree. Exit this shell when you are done: Switch commits what changed and runs the task's checks."
+	cmd := exec.Command("/bin/sh", "-c", `printf '%s\n\n' "$1"; exec "$0"`, shell, note)
+	cmd.Dir = dir
+	return cmd
+}
+
+// checkFix checks the task once its shell exits. A shell exits with the
+// status of the last command run in it, which says nothing about the fix.
+func (m model) checkFix(msg fixShellMsg) (tea.Model, tea.Cmd) {
+	var exit *exec.ExitError
+	if msg.err != nil && !errors.As(msg.err, &exit) {
+		m.fail("could not open your shell", msg.err.Error())
+		return m, nil
+	}
+	m.fixing = msg.taskID
+	m.notify("checking your fix of "+shortTaskID(msg.taskID), "it goes back to review once its checks pass")
+	check := m.taskAction("fix", msg.taskID, "")
+	return m, func() tea.Msg { return fixedMsg(check().(taskActionMsg)) }
+}
+
+// approveAll merges tasks in the order given and stops at the first that
+// fails, saying what merged and what still waits.
+func (m model) approveAll(ids []string) tea.Cmd {
+	engine, err := m.taskEngine()
+	if err != nil {
+		return func() tea.Msg { return taskActionMsg{title: "approve failed", body: err.Error()} }
+	}
+	ctx, state, runID := m.ctx, m.store, m.runID()
+	names := make([]string, len(ids))
+	for i, id := range ids {
+		names[i] = shortTaskID(id)
+	}
+	return func() tea.Msg {
+		for i, id := range ids {
+			err := engine.Approve(ctx, id)
+			if err == nil {
+				continue
+			}
+			body := names[i] + " did not merge: " + err.Error()
+			if i > 0 {
+				body = "merged " + strings.Join(names[:i], ", ") + "\n\n" + body
+			}
+			if i+1 < len(names) {
+				body += "\n\nstill waiting for review: " + strings.Join(names[i+1:], ", ")
+			}
+			return taskActionMsg{title: "approve all stopped at " + names[i], body: body}
+		}
+		return taskActionMsg{title: "approve all", body: strings.Join(names, ", ") + " merged into the integration branch" + prDescription(ctx, state, runID)}
+	}
+}
+
+// prDescription writes the PR description of a run that has completed, as
+// the last approval can now complete it, and says where it is.
+func prDescription(ctx context.Context, state *store.Store, runID string) string {
+	run, ok, err := state.GetRun(ctx, runID)
+	if err != nil || !ok || run.Status != execution.RunCompleted {
+		return runcli.ChecksFailed(ctx, state, run)
+	}
+	path, err := runcli.WriteSummary(ctx, state, config.StateDir(), runID)
+	if err != nil {
+		return "\nThe PR description was not written: " + err.Error()
+	}
+	return "\nPR description: " + shortenHome(path)
+}
+
+// colorDiff colors a unified diff's added, removed and hunk lines. One color
+// per line keeps a long diff cheap to redraw, which Glamour's highlighting is not.
+func colorDiff(diff string) string {
+	added, removed, hunk := lipgloss.NewStyle().Foreground(green), lipgloss.NewStyle().Foreground(red), lipgloss.NewStyle().Foreground(teal)
+	lines := strings.Split(diff, "\n")
+	for i, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "+"):
+			lines[i] = added.Render(line)
+		case strings.HasPrefix(line, "-"):
+			lines[i] = removed.Render(line)
+		case strings.HasPrefix(line, "@@"):
+			lines[i] = hunk.Render(line)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m model) taskDetail(task store.Task) string {

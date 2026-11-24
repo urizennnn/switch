@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/urizennnn/switch/internal/execution"
 	"github.com/urizennnn/switch/internal/store"
 )
@@ -99,7 +100,7 @@ func (m *model) focusUp() {
 // subagent's own name when it is unique.
 func (m *model) openAgent(name string) {
 	name = strings.ReplaceAll(strings.TrimSpace(name), " › ", "/")
-	if name == "" || name == m.lead.Name {
+	if name == "" {
 		m.setFocus("")
 		return
 	}
@@ -114,6 +115,10 @@ func (m *model) openAgent(name string) {
 	case 1:
 		m.setFocus(matches[0])
 	case 0:
+		if name == m.lead.Name { // its chat; while a run uses it, its run work is listed instead
+			m.setFocus("")
+			return
+		}
 		m.fail("no agent named "+name, "tab cycles through the lead, workers and subagents")
 	default:
 		m.fail(name+" is ambiguous", "use worker/name: "+strings.Join(matches, ", "))
@@ -195,7 +200,7 @@ func (m model) agentContent(width, height int) string {
 	headText := strings.Join(head, "\n")
 	lines := strings.Split(m.agentBody(inner), "\n")
 	body := strings.Join(window(lines, m.agentTop, m.agentRoom(lipgloss.Height(headText))), "\n")
-	return headText + "\n\n" + body + "\n\n" + dimStyle.Render(m.agentHint())
+	return headText + "\n\n" + body + "\n\n" + dimStyle.Render(truncate(m.agentHint(), inner))
 }
 
 // agentHead is the followed agent's header: who it is, what it is doing,
@@ -239,7 +244,7 @@ func (m model) agentBody(inner int) string {
 	name := m.focus[strings.LastIndexByte(m.focus, '/')+1:]
 	body := renderEntries(m.agentEntries[m.focus], inner, name, m.frame, m.showThoughts, m.showCommands)
 	if since, busy := m.agentBusy[m.focus]; busy {
-		body = strings.TrimLeft(body+"\n\n", "\n") + activityLine(activity(m.agentEntries[m.focus]), since, m.frame, "ctrl+x to stop")
+		body = strings.TrimLeft(body+"\n\n", "\n") + ansi.Truncate(activityLine(activity(m.agentEntries[m.focus]), since, m.frame, "ctrl+x to stop"), inner, "…")
 	}
 	if body == "" {
 		body = dimStyle.Render("nothing from " + name + " in this session yet")

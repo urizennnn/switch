@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/urizennnn/switch/internal/chat"
 	"github.com/urizennnn/switch/internal/config"
+	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/store"
 )
 
@@ -93,7 +94,7 @@ func (m model) sessionAgent(s store.SessionSummary) (config.Agent, bool) {
 	}
 	if s.AgentName == "" {
 		for _, agent := range m.dashboardFleet() {
-			if agent.Driver == s.Driver {
+			if agent.Driver == acpdriver.DriverName(s.Driver) {
 				return agent, true
 			}
 		}
@@ -121,14 +122,21 @@ func (m model) handleResumed(msg resumedMsg) (tea.Model, tea.Cmd) {
 	m.status = msg.status
 	_ = m.persistLead(msg.agent.Name)
 	m.team.setLead(msg.agent.Name)
+	m.team.resetUsage(msg.agent.Name)
+	m.ctxUsed, m.ctxSize = 0, 0
 	m.home = false
 	m.loadHistory()
 	m.refreshViewport()
 	m.refreshDashboard()
-	if msg.status.ResumeError != nil {
-		m.fail("could not resume", msg.agent.Name+" could not reopen that session, so a new one was started. "+firstLine(msg.status.ResumeError.Error()))
-	}
+	m.reportResume(msg.status)
 	return m, m.listen()
+}
+
+// reportResume tells the user when the lead could not reopen a session.
+func (m *model) reportResume(status chat.Status) {
+	if status.ResumeError != nil {
+		m.fail("could not resume", m.lead.Name+" could not reopen that session, so a new one was started. "+firstLine(status.ResumeError.Error()))
+	}
 }
 
 func (m model) sessionPickerContent(width int) string {

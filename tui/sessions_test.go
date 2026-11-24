@@ -3,10 +3,12 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/urizennnn/switch/internal/chat"
 	"github.com/urizennnn/switch/internal/config"
@@ -42,6 +44,10 @@ func TestResumePickerRules(t *testing.T) {
 		{ID: "gone", AgentName: "retired-agent"},
 		{ID: "past", AgentName: "builder-1", Driver: "claude"},
 	}}
+	// Older builds stored no agent name, and the driver as the config spelled it.
+	if agent, ok := m.sessionAgent(store.SessionSummary{ID: "old", Driver: "Claude-Code"}); !ok || agent.Name != "builder-1" {
+		t.Fatalf("a session stored under Claude-Code belongs to %q, %v", agent.Name, ok)
+	}
 
 	picker := m.sessionPicker
 	next, cmd := m.handleSessionPickerKey(keyEnter())
@@ -103,8 +109,8 @@ func TestSidebarShowsOneLead(t *testing.T) {
 	if strings.Count(out, "●") != 1 || !strings.Contains(out, "builder-1") || !strings.Contains(out, "claude · sonnet") {
 		t.Fatalf("lead section wrong:\n%s", out)
 	}
-	if strings.Contains(out, "opencode") || strings.Contains(out, "standby") {
-		t.Fatalf("an agent that is not leading is shown as a lead:\n%s", out)
+	if strings.Count(out, "○") != 2 || !strings.Contains(out, "standby · opencode") {
+		t.Fatalf("an agent that is not leading is not listed as a standby:\n%s", out)
 	}
 	if !strings.Contains(out, "builder-2") || !strings.Contains(out, "WORKERS") {
 		t.Fatalf("worker missing:\n%s", out)
@@ -145,5 +151,103 @@ func TestSessionPickerAndResumeID(t *testing.T) {
 	m.width, m.height = 120, 30
 	if out := m.sessionPickerContent(80); !strings.Contains(out, "current") || !strings.Contains(out, "switch --resume now") {
 		t.Fatalf("picker content:\n%s", out)
+	}
+}
+
+func TestSessionCommandsWaitForTheTurn(t *testing.T) {
+	m := New(Options{Context: context.Background(), Project: "/p", Lead: config.Agent{Name: "lead", Driver: "opencode"},
+		Fleet: []config.Agent{{Name: "lead", Driver: "opencode"}, {Name: "builder-1", Driver: "opencode"}}})
+	m.chat = &chat.Chat{Session: &acpdriver.Session{ID: "now"}}
+	m.connecting, m.state = false, "ready"
+	// Mid-turn, and after the reply ended while its Send still writes to the
+	// session: switching sessions or leads would close or copy it under Send.
+	for _, at := range []struct{ busy, sending bool }{{true, true}, {false, true}} {
+		m.busy, m.sending = at.busy, at.sending
+		for _, command := range []string{"/session", "/new", "/lead builder-1"} {
+			next, cmd := m.handleSlash(command)
+			if got := next.(model); cmd != nil || got.sessionPicker != nil || got.gen != m.gen || !strings.Contains(got.toastText(), "busy") {
+				t.Errorf("%s ran with busy=%v sending=%v", command, at.busy, at.sending)
+			}
+		}
+	}
+}
+
+func TestWholeReplyIsSaved(t *testing.T) {
+	state, err := store.Open(filepath.Join(t.TempDir(), "switch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	ctx := context.Background()
+	m := New(Options{Context: ctx, Project: "/p", Store: state, Lead: config.Agent{Name: "lead", Driver: "opencode"}})
+	m.chat = &chat.Chat{Project: "/p", Store: state, Session: &acpdriver.Session{ID: "s1"}}
+	m.connecting, m.busy, m.state = false, true, "working"
+	m.appendUser("restructure x")
+	var cmd tea.Cmd
+	for _, event := range []acpdriver.Event{
+		{Type: acpdriver.EventMessage, Text: "I'll restructure "},
+		{Type: acpdriver.EventMessage, Text: "x."},
+		{Type: acpdriver.EventToolCall, Tool: &acpdriver.ToolInfo{ID: "e", Title: "Edit", Status: "completed"}},
+		{Type: acpdriver.EventThought, Text: "check it"},
+		{Type: acpdriver.EventMessage, Text: "Done."},
+		{Type: acpdriver.EventTurn},
+	} {
+		var next tea.Model
+		next, cmd = m.Update(agentEventMsg{gen: m.gen, event: event})
+		m = next.(model)
+	}
+	m.bumpGen() // the turn's listener returns
+	for _, c := range cmd().(tea.BatchMsg) {
+		c()
+	}
+	messages, _ := state.Messages(ctx, "/p", "s1", 10)
+	if len(messages) != 1 || messages[0].Content != "I'll restructure x.\n\nDone." {
+		t.Fatalf("saved %+v", messages)
+	}
+}
+
+func TestResumeFallbackAtLaunchIsReported(t *testing.T) {
+	state, err := store.Open(filepath.Join(t.TempDir(), "switch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	m := New(Options{Context: context.Background(), Project: "/p", Store: state, Lead: config.Agent{Name: "lead", Driver: "opencode"}, Resume: "gone"})
+	fresh := &chat.Chat{Project: "/p", Store: state, Session: &acpdriver.Session{ID: "fresh"}}
+	next, _ := m.Update(connectedMsg{chat: fresh, status: chat.Status{ResumeError: errors.New("session not found")}})
+	if got := next.(model).toastText(); !strings.Contains(got, "new one was started") || !strings.Contains(got, "session not found") {
+		t.Fatalf("toast = %q", got)
+	}
+}
+
+func TestHistoryShowsWhatTheUserSaid(t *testing.T) {
+	state, err := store.Open(filepath.Join(t.TempDir(), "switch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	ctx := context.Background()
+	for i := range 52 {
+		_ = state.AppendMessage(ctx, "/p", "s", "assistant", fmt.Sprintf("reply %d", i))
+	}
+	_ = state.AppendMessage(ctx, "/p", "s", "user", planModeNote+"plan the auth work")
+	_ = state.AppendMessage(ctx, "/p", "s", "user", "[Switch] lead was the lead and handed the conversation to you near its limit")
+	_ = state.AppendMessage(ctx, "/p", "s", "user", planModeNote+"[Switch] The user made you the lead in place of lead.") // sent in plan mode
+	m := model{ctx: ctx, store: state, project: "/p", chat: &chat.Chat{Project: "/p", Store: state, Session: &acpdriver.Session{ID: "s"}}}
+	m.loadHistory()
+	if e := m.entries[0]; e.kind != entrySystem || !strings.Contains(e.text, "earlier messages") {
+		t.Fatalf("first entry = %+v, want a note that earlier messages are not shown", e)
+	}
+	n := len(m.entries)
+	if e := m.entries[n-3]; e.kind != entryUser || e.text != "plan the auth work" {
+		t.Fatalf("plan-mode message shown as %+v", e)
+	}
+	for _, e := range m.entries[n-2:] {
+		if e.kind != entrySystem || strings.Contains(e.text, "plan mode") {
+			t.Fatalf("Switch's prompt shown as %+v", e)
+		}
+	}
+	if m.ResumeID() == "" {
+		t.Fatal("the user's own message no longer counts as a conversation")
 	}
 }

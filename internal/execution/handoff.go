@@ -45,22 +45,31 @@ func (l Limits) Near() bool {
 	return l.HandoffAt > 0 && l.Percent() >= l.HandoffAt
 }
 
-func (e *Engine) setUsage(agent string, usage acpdriver.UsageInfo) {
+// useSession records the session an agent's task turn runs in: its context
+// use is that session's, unknown for a new one until its adapter reports.
+func (e *Engine) useSession(agent, session string) {
 	e.stopMu.Lock()
-	e.usage[agent] = usage
+	e.sessions[agent] = session
 	e.stopMu.Unlock()
 }
 
-// Limits reports an agent's context use and who it hands off to.
+func (e *Engine) setUsage(session string, usage acpdriver.UsageInfo) {
+	e.stopMu.Lock()
+	e.usage[session] = usage
+	e.stopMu.Unlock()
+}
+
+// Limits reports an agent's context use in its task session and who it hands
+// off to.
 func (e *Engine) Limits(agent string) Limits {
 	e.stopMu.Lock()
-	usage := e.usage[agent]
+	usage := e.usage[e.sessions[agent]]
 	e.stopMu.Unlock()
 	return Limits{Used: usage.Used, Size: usage.Size, HandoffAt: e.opts.Config.HandoffAt, HandoffTo: e.handoffTarget(agent)}
 }
 
 // handoffTarget is the agent configured to continue from, or else the run's
-// lead; "" when there is none.
+// lead, or else a standby lead; "" when there is none.
 func (e *Engine) handoffTarget(from string) string {
 	ctx, cancel := saveContext()
 	defer cancel()
@@ -68,9 +77,11 @@ func (e *Engine) handoffTarget(from string) string {
 	if to := e.opts.Handoffs[from]; to != "" && hasAgent(agents, to) {
 		return to
 	}
-	for _, agent := range agents {
-		if agent.Role == "lead" && agent.Name != from {
-			return agent.Name
+	for _, role := range []string{"lead", "standby"} {
+		for _, agent := range agents {
+			if agent.Role == role && agent.Name != from {
+				return agent.Name
+			}
 		}
 	}
 	return ""
@@ -116,16 +127,36 @@ func (e *Engine) takeHandoff(taskID string) (handoff, bool) {
 	return h, ok
 }
 
-// handOff queues the task for its new agent, keeping the worktree and
-// starting a fresh session, since sessions belong to one agent.
+// handOff queues the task for its new agent. On the last attempt it is sent
+// back instead, which escalates or blocks it.
 func (e *Engine) handOff(task store.Task, from store.RunAgent, h handoff) {
-	feedback := handoffPrefix + from.Name + ":\n" + h.note
 	if task.Attempts >= e.opts.Config.MaxAttempts {
-		e.finish(task, from, StatusBlocked, fmt.Sprintf("%s wanted to hand off to %s, but the attempt limit (%d) is reached:\n%s", from.Name, h.to, e.opts.Config.MaxAttempts, h.note))
+		e.retry(task, from, fmt.Sprintf("%s wanted to hand off to %s:\n%s", from.Name, h.to, h.note))
 		return
 	}
-	task.Assignee, task.SessionID, task.Feedback = h.to, "", feedback
-	e.finish(task, from, StatusQueued, "handed off to "+h.to)
+	e.finish(passOn(task, from.Name, h), from, StatusQueued, "handed off to "+h.to)
+}
+
+// passOn assigns the task to the handoff's agent with its note, keeping the
+// worktree and starting a fresh session, since sessions belong to one agent.
+func passOn(task store.Task, from string, h handoff) store.Task {
+	task.Assignee, task.SessionID, task.Feedback = h.to, "", handoffPrefix+from+":\n"+h.note
+	return task
+}
+
+// escalation is the agent configured to get one more attempt at from's task
+// when its attempts run out; "" when there is none in this run.
+func (e *Engine) escalation(from string) string {
+	to := e.opts.Escalations[from]
+	if to == "" || to == from {
+		return ""
+	}
+	ctx, cancel := saveContext()
+	defer cancel()
+	if agents, _ := e.opts.Store.RunAgents(ctx, e.run.ID); hasAgent(agents, to) {
+		return to
+	}
+	return ""
 }
 
 // limitHandoff hands the task on when its worker stopped at a limit.

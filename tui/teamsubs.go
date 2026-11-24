@@ -12,9 +12,9 @@ import (
 	"time"
 
 	acp "github.com/coder/acp-go-sdk"
-	"github.com/urizennnn/switch/internal/chat"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/execution"
+	"github.com/urizennnn/switch/internal/rules"
 	"github.com/urizennnn/switch/internal/store"
 )
 
@@ -53,6 +53,34 @@ func (m model) handleStream(msg streamMsg) (tea.Model, tea.Cmd) {
 	return m, waitStream(m.streams)
 }
 
+// settleBusy ends what the stream cannot: a run turn that was stopped, timed
+// out or cancelled ends without a closing event, so after each look at the
+// store an agent stays busy only while the chat or the run has a turn for it.
+func (m *model) settleBusy() {
+	for name := range m.agentBusy {
+		if !m.team.answering(name) && !m.runTurn(name) {
+			delete(m.agentBusy, name)
+		}
+	}
+}
+
+// runTurn reports whether the run this TUI drives has a turn going for an
+// agent: a worker's task, a subagent's, or the lead's review.
+func (m model) runTurn(name string) bool {
+	if m.job != "run" {
+		return false
+	}
+	if parent, sub, ok := strings.Cut(name, "/"); ok {
+		return slices.ContainsFunc(m.subagents, func(sa store.Subagent) bool {
+			return sa.Parent == parent && sa.Name == sub && sa.Status == execution.SubRunning
+		})
+	}
+	lead := slices.ContainsFunc(m.runAgents, func(a store.RunAgent) bool { return a.Name == name && a.Role == "lead" })
+	return slices.ContainsFunc(m.tasks, func(task store.Task) bool {
+		return task.Assignee == name && task.Status == execution.StatusRunning || lead && task.Status == execution.StatusReviewing
+	})
+}
+
 // stopFocused is ctrl+x: stop whatever the followed agent is doing.
 func (m model) stopFocused() (tea.Model, tea.Cmd) {
 	name := m.focus
@@ -64,6 +92,7 @@ func (m model) stopFocused() (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case m.team.stopAgent(name):
+		m.withdrawPrompts(name)
 		m.notify("stopping "+strings.ReplaceAll(name, "/", " › "), "")
 		return m, nil
 	case m.engine != nil:
@@ -99,12 +128,12 @@ func (t *team) emit(agent string, event acpdriver.Event) {
 	}
 }
 
-// permit answers a teammate's or subagent's permission request: reads go
-// ahead, anything else waits for the user.
+// permit answers a teammate's or subagent's permission request: reads inside
+// its directory go ahead, anything else waits for the user.
 func (t *team) permit(agent string) func(*acpdriver.PermissionRequest) {
 	return func(request *acpdriver.PermissionRequest) {
 		request.Agent = agent
-		if readOnlyKinds[request.Kind] {
+		if readOnlyKinds[request.Kind] && request.Inside {
 			request.Resolve(acpdriver.PermissionAllow)
 			return
 		}
@@ -118,6 +147,18 @@ func (t *team) permit(agent string) func(*acpdriver.PermissionRequest) {
 			request.Cancel()
 		}
 	}
+}
+
+// answering reports whether a teammate, or a subagent of one, has a turn
+// going in the chat.
+func (t *team) answering(name string) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	sa := t.subs[name]
+	return t.asked[name] || sa != nil && sa.rec.Status == execution.SubRunning
 }
 
 // stopAgent cancels what a teammate or one of its subagents is doing.
@@ -142,10 +183,21 @@ func (t *team) stopAgent(name string) bool {
 type chatSub struct {
 	rec     store.Subagent
 	session *acpdriver.Session
+	revoke  func() // ends its session's control-plane token
 	cancel  context.CancelFunc
 	inbox   []string
 	report  string
 	done    chan struct{}
+}
+
+// endSession closes the subagent's session and revokes its token. Callers
+// hold mu.
+func (sa *chatSub) endSession() {
+	go sa.session.Close(context.Background())
+	if sa.revoke != nil {
+		sa.revoke()
+	}
+	sa.session, sa.revoke = nil, nil
 }
 
 var chatSubName = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -177,6 +229,10 @@ func (t *team) Spawn(parent, _ string, req execution.SpawnRequest) (store.Subage
 	if allowed := t.subCfg.Drivers; len(allowed) > 0 && !slices.Contains(allowed, driver) {
 		return store.Subagent{}, fmt.Errorf("subagents may use %s; %s is not allowed", strings.Join(allowed, ", "), driver)
 	}
+	t.mu.Lock()
+	base := t.rules
+	t.mu.Unlock()
+	set := rules.Subagent(base, worker.Role, worker.Name, "") // reads the rule files, so not under mu
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -208,10 +264,10 @@ func (t *team) Spawn(parent, _ string, req execution.SpawnRequest) (store.Subage
 		Brief: brief, Status: execution.SubRunning, CreatedAt: time.Now(),
 	}}
 	t.subs[sa.rec.ID] = sa
-	prompt := fmt.Sprintf("You are %s, a read-only subagent that %s started to help answer a question about the project in %s. "+
+	prompt := set.Prompt(fmt.Sprintf("You are %s, a read-only subagent that %s started to help answer a question about the project in %s. "+
 		"You report only to %s.\n\nYour job:\n%s\n\nDo not create, edit, or delete any file, and do not start subagents of your own. "+
 		"When you are done, give your result with the switch_report MCP tool, then reply with the same result. "+
-		"Keep it short and concrete: %s reads only that.", name, parent, t.project, parent, brief, parent)
+		"Keep it short and concrete: %s reads only that.", name, parent, t.project, parent, brief, parent))
 	t.runSub(sa, firstLine(brief), prompt)
 	return sa.rec, nil
 }
@@ -223,9 +279,11 @@ func (t *team) runSub(sa *chatSub, label, prompt string) {
 	sa.cancel, sa.done = cancel, make(chan struct{})
 	sa.rec.Status = execution.SubRunning
 	id := sa.rec.ID
+	start := sa.session == nil // read under mu: stopSubs ends sessions under it
 	go func() {
 		defer cancel()
-		if sa.session == nil {
+		if start {
+			var revoke func()
 			grant := func(string) ([]acp.McpServer, []string) {
 				if t.server == nil {
 					return nil, nil
@@ -234,21 +292,34 @@ func (t *team) runSub(sa *chatSub, label, prompt string) {
 				if err != nil {
 					return nil, nil
 				}
+				revoke = g.Revoke
 				return g.MCPServers, g.Env
 			}
-			session, err := chat.StartSession(ctx, t.project, id, sa.rec.Driver, sa.rec.Model, grant)
+			// It outlives this run, so a finished subagent can be messaged again.
+			session, err := t.startSession(ctx, id, sa.rec.Driver, sa.rec.Model, grant)
 			if err != nil {
+				if revoke != nil {
+					revoke()
+				}
 				t.finishSub(sa, execution.SubFailed, "start: "+err.Error())
 				return
 			}
 			t.mu.Lock()
-			sa.session = session
+			sa.session, sa.revoke = session, revoke
 			t.mu.Unlock()
 		}
 		for {
 			t.emit(id, acpdriver.Event{Type: acpdriver.EventStart, Text: label})
+			t.mu.Lock()
+			session := sa.session
+			t.mu.Unlock()
+			if session == nil { // stopSubs ended it once its parent answered
+				t.emit(id, acpdriver.Event{Type: acpdriver.EventError, Err: errors.New("stopped")})
+				t.finishSub(sa, execution.SubStopped, "")
+				return
+			}
 			turnCtx, stop := context.WithTimeout(ctx, 9*time.Minute)
-			reply, err := sa.session.RunTurn(turnCtx, prompt, acpdriver.TurnOptions{
+			reply, err := session.RunTurn(turnCtx, prompt, acpdriver.TurnOptions{
 				OnEvent:      func(event acpdriver.Event) { t.emit(id, event) },
 				OnPermission: t.permit(id),
 			})
@@ -256,6 +327,9 @@ func (t *team) runSub(sa *chatSub, label, prompt string) {
 			t.mu.Lock()
 			switch {
 			case ctx.Err() != nil:
+				if sa.session != nil { // its prompt may still answer, and a follow-up would take that as its reply
+					sa.endSession()
+				}
 				t.mu.Unlock()
 				t.emit(id, acpdriver.Event{Type: acpdriver.EventError, Err: errors.New("stopped")})
 				t.finishSub(sa, execution.SubStopped, "")
@@ -297,16 +371,11 @@ func (t *team) finishSub(sa *chatSub, status, summary string) {
 func (t *team) stopSubs(parent string) {
 	t.Stop(parent, "", "")
 	t.mu.Lock()
-	var sessions []*acpdriver.Session
+	defer t.mu.Unlock()
 	for _, sa := range t.subs {
 		if sa.rec.Parent == parent && sa.session != nil {
-			sessions = append(sessions, sa.session)
-			sa.session = nil
+			sa.endSession()
 		}
-	}
-	t.mu.Unlock()
-	for _, session := range sessions {
-		go session.Close(context.Background())
 	}
 }
 
@@ -343,7 +412,7 @@ func (t *team) Message(parent, _, name, text string) (string, error) {
 		sa.inbox = append(sa.inbox, text)
 		return name + " gets this when its current turn ends", nil
 	}
-	if sa.session == nil {
+	if !live(sa.session) {
 		return "", fmt.Errorf("%s has ended; start a new subagent", name)
 	}
 	sa.report = ""

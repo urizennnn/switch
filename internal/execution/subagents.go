@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/rules"
 	"github.com/urizennnn/switch/internal/store"
 )
@@ -48,6 +49,8 @@ type subagent struct {
 
 var subagentName = regexp.MustCompile(`[^a-z0-9-]+`)
 
+var errBudget = errors.New("the run budget is used up (max_turns or max_tokens); finish the task yourself")
+
 // Spawn starts a subagent for the worker's running task.
 func (e *Engine) Spawn(parent, taskID string, req SpawnRequest) (store.Subagent, error) {
 	limit := e.opts.Config.Subagents.MaxPerBuilder
@@ -60,10 +63,11 @@ func (e *Engine) Spawn(parent, taskID string, req SpawnRequest) (store.Subagent,
 	}
 	ctx, cancel := saveContext()
 	defer cancel()
-	task, worker, err := e.workerTask(ctx, parent, taskID)
+	task, worker, slot, err := e.workerTask(ctx, parent, taskID)
 	if err != nil {
 		return store.Subagent{}, err
 	}
+	worker.Driver = acpdriver.DriverName(worker.Driver) // a run planned by an older build stored it as configured
 	driver, model := strings.TrimSpace(req.Driver), strings.TrimSpace(req.Model)
 	if driver == "" {
 		driver = worker.Driver
@@ -75,7 +79,7 @@ func (e *Engine) Spawn(parent, taskID string, req SpawnRequest) (store.Subagent,
 		return store.Subagent{}, fmt.Errorf("subagents may use %s; %s is not allowed ([run.subagents] drivers)", strings.Join(allowed, ", "), driver)
 	}
 	if ok, err := e.budgetLeft(); err != nil || !ok {
-		return store.Subagent{}, errors.New("the run budget is used up (max_turns or max_tokens); finish the task yourself")
+		return store.Subagent{}, errBudget
 	}
 	files := make([]string, 0, len(req.Files))
 	for _, file := range req.Files {
@@ -97,18 +101,8 @@ func (e *Engine) Spawn(parent, taskID string, req SpawnRequest) (store.Subagent,
 	if err != nil {
 		return store.Subagent{}, err
 	}
-	running := 0
-	for _, sa := range e.subs {
-		if sa.rec.TaskID != taskID || sa.rec.Status != SubRunning {
-			continue
-		}
-		running++
-		if file, ok := overlap(files, sa.rec.Files); ok {
-			return store.Subagent{}, fmt.Errorf("%s already edits %s; give each subagent different files", sa.rec.Name, file)
-		}
-	}
-	if running >= limit {
-		return store.Subagent{}, fmt.Errorf("you already have %d subagents running, the limit; wait for one with switch_wait or stop one", running)
+	if err := e.room(taskID, files); err != nil {
+		return store.Subagent{}, err
 	}
 
 	name := uniqueName(subagentName.ReplaceAllString(strings.ToLower(strings.TrimSpace(req.Name)), "-"), taskID, existing)
@@ -121,15 +115,37 @@ func (e *Engine) Spawn(parent, taskID string, req SpawnRequest) (store.Subagent,
 	}
 	sa := &subagent{rec: rec}
 	e.subs[rec.ID] = sa
-	e.startSubagent(sa, task, worker, firstLine(brief), SubagentPrompt(task, rec, e.subagentRules(task, worker)))
+	env := e.env(taskID, slot)
+	e.startSubagent(sa, task, worker, env, firstLine(brief), SubagentPrompt(task, rec, rules.Subagent(e.opts.Rules, worker.Role, worker.Name, planID(task.ID)))+envNote(env))
 	e.log(ctx, taskID, parent, "subagent", "started "+name+": "+firstLine(brief))
 	return rec, nil
 }
 
-// startSubagent runs turns until the subagent has no follow-up waiting.
-// Callers hold subMu.
-func (e *Engine) startSubagent(sa *subagent, task store.Task, worker store.RunAgent, label, prompt string) {
-	ctx, cancel := context.WithCancel(e.runCtx)
+// room checks that one more subagent claiming files may run for the task:
+// under the limit, and editing no file a running sibling claims. Callers hold
+// subMu.
+func (e *Engine) room(taskID string, files []string) error {
+	running := 0
+	for _, sa := range e.subs {
+		if sa.rec.TaskID != taskID || sa.rec.Status != SubRunning {
+			continue
+		}
+		running++
+		if file, ok := overlap(files, sa.rec.Files); ok {
+			return fmt.Errorf("%s already edits %s; give each subagent different files", sa.rec.Name, file)
+		}
+	}
+	if running >= e.opts.Config.Subagents.MaxPerBuilder {
+		return fmt.Errorf("you already have %d subagents running, the limit; wait for one with switch_wait or stop one", running)
+	}
+	return nil
+}
+
+// startSubagent runs turns until the subagent has no follow-up waiting, with
+// its worker's env. Callers hold subMu.
+func (e *Engine) startSubagent(sa *subagent, task store.Task, worker store.RunAgent, env []string, label, prompt string) {
+	runCtx := e.runCtx // Run clears e.runCtx when it returns, which this may outlive
+	ctx, cancel := context.WithCancel(runCtx)
 	sa.cancel, sa.done = cancel, make(chan struct{})
 	sa.rec.Status = SubRunning
 	agent := store.RunAgent{ID: sa.rec.ID, RunID: e.run.ID, Name: sa.rec.Parent + "/" + sa.rec.Name, Role: "subagent", Driver: sa.rec.Driver, Model: sa.rec.Model}
@@ -139,8 +155,8 @@ func (e *Engine) startSubagent(sa *subagent, task store.Task, worker store.RunAg
 			turnCtx, stop := context.WithTimeout(ctx, time.Duration(e.opts.Config.TurnTimeout)*time.Second)
 			result, err := e.opts.Turn(turnCtx, TurnRequest{
 				Label: label,
-				Agent: agent, TaskID: task.ID, Cwd: task.Worktree, SessionID: sa.rec.SessionID,
-				Prompt: prompt, Permission: e.opts.Permission, Ask: e.opts.OnPermission != nil,
+				Agent: agent, TaskID: task.ID, Cwd: e.dir(task.Worktree), SessionID: sa.rec.SessionID,
+				Prompt: prompt, Permission: e.opts.Permission, Ask: e.opts.OnPermission != nil, Env: env,
 			})
 			stop()
 			e.recordTurn(task, agent, result)
@@ -150,7 +166,7 @@ func (e *Engine) startSubagent(sa *subagent, task store.Task, worker store.RunAg
 				sa.rec.SessionID = result.SessionID
 			}
 			switch {
-			case ctx.Err() != nil && e.runCtx.Err() != nil:
+			case ctx.Err() != nil && runCtx.Err() != nil:
 				sa.rec.Status = SubInterrupted
 			case ctx.Err() != nil:
 				sa.rec.Status = SubStopped
@@ -187,9 +203,12 @@ func (e *Engine) Message(parent, taskID, name, text string) (string, error) {
 	if text == "" {
 		return "", errors.New("message needs text")
 	}
+	if ok, err := e.budgetLeft(); err != nil || !ok { // either way it costs another turn
+		return "", errBudget
+	}
 	ctx, cancel := saveContext()
 	defer cancel()
-	task, worker, err := e.workerTask(ctx, parent, taskID)
+	task, worker, slot, err := e.workerTask(ctx, parent, taskID)
 	if err != nil {
 		return "", err
 	}
@@ -206,17 +225,11 @@ func (e *Engine) Message(parent, taskID, name, text string) (string, error) {
 	if e.runCtx == nil || e.runCtx.Err() != nil {
 		return "", errors.New("the run is not active")
 	}
-	running := 0
-	for _, other := range e.subs {
-		if other.rec.TaskID == taskID && other.rec.Status == SubRunning {
-			running++
-		}
-	}
-	if running >= e.opts.Config.Subagents.MaxPerBuilder {
-		return "", fmt.Errorf("you already have %d subagents running, the limit", running)
+	if err := e.room(taskID, sa.rec.Files); err != nil {
+		return "", err
 	}
 	sa.report = ""
-	e.startSubagent(sa, task, worker, parent+": "+firstLine(text), text)
+	e.startSubagent(sa, task, worker, e.env(taskID, slot), parent+": "+firstLine(text), text)
 	_ = e.opts.Store.SaveSubagent(ctx, sa.rec)
 	e.log(ctx, taskID, parent, "subagent", name+" resumed")
 	return name + " is working on it", nil
@@ -335,50 +348,48 @@ func (e *Engine) RunningSubagents(taskID string) int {
 	return n
 }
 
-// ownSubagent finds the worker's subagent by name. Callers hold subMu.
+// ownSubagent finds the worker's subagent by name, also a finished one an
+// earlier Switch process ran. Callers hold subMu.
 func (e *Engine) ownSubagent(parent, taskID, name string) (*subagent, error) {
-	sa, ok := e.subs[taskID+"/"+name]
+	id := taskID + "/" + name
+	if _, ok := e.subs[id]; !ok {
+		ctx, cancel := saveContext()
+		defer cancel()
+		subs, _ := e.opts.Store.SubagentsForRun(ctx, e.run.ID)
+		for _, rec := range subs {
+			if rec.ID == id && rec.Status != SubRunning {
+				e.subs[id] = &subagent{rec: rec}
+			}
+		}
+	}
+	sa, ok := e.subs[id]
 	if !ok || sa.rec.Parent != parent {
 		return nil, fmt.Errorf("you have no subagent named %q; switch_subagents lists them", name)
 	}
 	return sa, nil
 }
 
-// workerTask is the caller's task, which must be running and assigned to it.
-func (e *Engine) workerTask(ctx context.Context, parent, taskID string) (store.Task, store.RunAgent, error) {
+// workerTask is the caller's task, which must be running and assigned to it,
+// the worker, and the slot its task runs in: Ready gives it by the worker's
+// place in the run.
+func (e *Engine) workerTask(ctx context.Context, parent, taskID string) (store.Task, store.RunAgent, int, error) {
 	task, ok, err := e.opts.Store.GetTask(ctx, taskID)
 	if err != nil {
-		return store.Task{}, store.RunAgent{}, err
+		return store.Task{}, store.RunAgent{}, 0, err
 	}
 	if !ok || task.Assignee != parent || task.Status != StatusRunning {
-		return store.Task{}, store.RunAgent{}, errors.New("subagents can only be started for your running task")
+		return store.Task{}, store.RunAgent{}, 0, errors.New("subagents can only be started for your running task")
 	}
 	agents, err := e.opts.Store.RunAgents(ctx, e.run.ID)
 	if err != nil {
-		return store.Task{}, store.RunAgent{}, err
+		return store.Task{}, store.RunAgent{}, 0, err
 	}
-	for _, agent := range agents {
+	for i, agent := range agents {
 		if agent.Name == parent {
-			return task, agent, nil
+			return task, agent, i + 1, nil
 		}
 	}
-	return store.Task{}, store.RunAgent{}, fmt.Errorf("unknown worker %s", parent)
-}
-
-// subagentRules are the worker's rules plus roles/subagent.md.
-func (e *Engine) subagentRules(task store.Task, worker store.RunAgent) rules.Set {
-	set, err := rules.Scoped(e.opts.Rules, worker.Role, worker.Name, planID(task.ID))
-	if err != nil {
-		return e.opts.Rules
-	}
-	if extra, err := rules.Scoped(e.opts.Rules, "subagent", "", ""); err == nil {
-		for _, source := range extra.Sources {
-			if strings.HasSuffix(source.Scope, "role:subagent") {
-				set.Sources = append(set.Sources, source)
-			}
-		}
-	}
-	return set
+	return store.Task{}, store.RunAgent{}, 0, fmt.Errorf("unknown worker %s", parent)
 }
 
 // recoverSubagents marks subagents a crashed process left running.

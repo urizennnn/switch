@@ -12,6 +12,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +38,11 @@ const (
 	StatusBlocked     = "blocked" // needs the user: retries exhausted, conflict, or worker gave up
 	StatusInterrupted = "interrupted"
 )
+
+// ProposedBy starts the note that blocks a task the chat's lead proposed
+// until the user accepts it with /retry. Such a task does not hold the run
+// back: once the other tasks merge, the run completes.
+const ProposedBy = "proposed by "
 
 // Run outcomes stored in runs.status.
 const (
@@ -61,6 +69,8 @@ type TurnRequest struct {
 	Ephemeral bool
 	// Label describes the turn in live views, such as the task title.
 	Label string
+	// Env adds to the agent's environment.
+	Env []string
 }
 
 type TurnResult struct {
@@ -86,7 +96,8 @@ type Options struct {
 	// Poll rechecks the store this often while waiting, for approvals made
 	// by another process (a detached run approved from the TUI).
 	Poll time.Duration
-	// Permission answers worker requests when OnPermission is nil.
+	// Permission answers worker requests when OnPermission is nil, for what
+	// build mode would ask the user about.
 	Permission   acpdriver.PermissionMode
 	OnPermission func(*acpdriver.PermissionRequest)
 	OnText       func(agent, text string)
@@ -95,6 +106,9 @@ type Options struct {
 	// Handoffs names, per agent, who continues its task when it runs out of
 	// room; agents without one hand off to the run's lead.
 	Handoffs map[string]string
+	// Escalations names, per agent, who gets one more attempt at its task
+	// when its attempts run out; without one the task is blocked.
+	Escalations map[string]string
 	// OnChange is called after every task transition.
 	OnChange  func()
 	AgentLogs io.Writer
@@ -102,6 +116,9 @@ type Options struct {
 	Turn TurnFunc
 	// Control, when set, is offered to agents as the Switch MCP server.
 	Control ControlPlane
+	// Headless marks a run driven without a TUI, which `__control stop`
+	// may interrupt; a TUI's run is stopped from that TUI.
+	Headless bool
 }
 
 // ControlPlane lets agents report to Switch during a turn.
@@ -116,6 +133,7 @@ type ControlPlane interface {
 type Grant struct {
 	MCPServers []acp.McpServer
 	Env        []string
+	Revoke     func() // ends the grant's access when its turn ends
 }
 
 type Engine struct {
@@ -123,18 +141,23 @@ type Engine struct {
 	run     store.Run
 	manager *worktree.Manager
 
-	mu   sync.Mutex // serializes task transitions and merges
+	mu   sync.Mutex // serializes task transitions; the merge lock serializes merges
 	wake chan struct{}
 
 	subMu  sync.Mutex
 	subs   map[string]*subagent // by ID, started by this process
 	runCtx context.Context      // the active Run's context; subagents end with it
 
-	stopMu   sync.Mutex
-	turns    map[string]context.CancelFunc  // worker name -> its running task turn
-	stopping map[string]bool                // task IDs the user stopped
-	usage    map[string]acpdriver.UsageInfo // context use by agent, as adapters report it
-	handoffs map[string]handoff             // task ID -> handoff its worker asked for
+	stopMu    sync.Mutex
+	turns     map[string]context.CancelFunc  // worker name -> its running task turn or setup
+	live      map[string]liveTurn            // agent -> its running turn, for Steer
+	steers    map[[2]string]string           // agent and task -> what Steer could not get into its turn on the task, for its next one
+	watchdogs map[string]*time.Timer         // task ID -> no-events watchdog of its worker turn
+	asking    map[string]string              // agent -> task whose watchdog waits while it asks for permission
+	stopping  map[string]bool                // task IDs the user stopped
+	usage     map[string]acpdriver.UsageInfo // context use by session ID, as adapters report it
+	sessions  map[string]string              // agent -> session of its latest task turn
+	handoffs  map[string]handoff             // task ID -> handoff its worker asked for
 }
 
 // New loads the run and prepares an engine for it.
@@ -165,6 +188,9 @@ func New(ctx context.Context, opts Options) (*Engine, error) {
 	if opts.Config.TurnTimeout <= 0 {
 		opts.Config.TurnTimeout = defaults.TurnTimeout
 	}
+	if opts.Config.IdleTimeout <= 0 {
+		opts.Config.IdleTimeout = defaults.IdleTimeout
+	}
 	if opts.Permission == "" {
 		opts.Permission = acpdriver.PermissionDeny
 	}
@@ -177,8 +203,9 @@ func New(ctx context.Context, opts Options) (*Engine, error) {
 		run.IntegrationPath = manager.Root(run.ID) + "/integration"
 	}
 	e := &Engine{opts: opts, run: run, manager: manager, wake: make(chan struct{}, 1), subs: map[string]*subagent{},
-		turns: map[string]context.CancelFunc{}, stopping: map[string]bool{},
-		usage: map[string]acpdriver.UsageInfo{}, handoffs: map[string]handoff{}}
+		turns: map[string]context.CancelFunc{}, live: map[string]liveTurn{}, steers: map[[2]string]string{},
+		watchdogs: map[string]*time.Timer{}, asking: map[string]string{}, stopping: map[string]bool{},
+		usage: map[string]acpdriver.UsageInfo{}, sessions: map[string]string{}, handoffs: map[string]handoff{}}
 	if e.opts.Turn == nil {
 		e.opts.Turn = e.acpTurn
 	}
@@ -187,18 +214,25 @@ func New(ctx context.Context, opts Options) (*Engine, error) {
 
 // Run schedules tasks until none can make progress. It returns the run
 // outcome; a cancelled context interrupts running tasks and returns
-// RunStopped with the context error.
+// RunStopped with the context error, and the run's own checks ([run] verify)
+// failing once every task is merged return RunBlocked with their evidence.
 func (e *Engine) Run(ctx context.Context) (string, error) {
-	lock, err := LockRun(e.opts.StateDir, e.run.ID)
+	lock, err := LockRun(e.opts.StateDir, e.run.ID, e.opts.Headless)
 	if err != nil {
 		return "", err
 	}
 	defer lock.Release()
-	if err := e.recover(); err != nil {
+	skipped, err := e.recover()
+	if err != nil {
 		return "", err
 	}
+	// Running out of budget interrupts the worker and subagent turns still
+	// running, as a stop does, so they resume in a later run. The checks and
+	// review of work already done go on.
+	turns, interrupt := context.WithCancel(ctx)
+	defer interrupt()
 	e.subMu.Lock()
-	e.runCtx = ctx
+	e.runCtx = turns
 	e.subMu.Unlock()
 	defer func() {
 		e.subMu.Lock()
@@ -211,40 +245,51 @@ func (e *Engine) Run(ctx context.Context) (string, error) {
 	busy := map[string]bool{}
 	for {
 		budget, err := e.budgetLeft()
-		if err != nil {
+		switch {
+		case err != nil && len(busy) == 0:
 			return "", err
+		case err != nil:
+			budget = false // a failed read must not abandon running workers; the next pass reads it again
+		case !budget:
+			interrupt()
 		}
 		if budget && len(busy) < e.opts.Config.MaxConcurrency {
 			for _, a := range e.dispatch(busy, e.opts.Config.MaxConcurrency-len(busy)) {
 				busy[a.agent.Name] = true
 				go func(a assignment) {
-					e.process(ctx, a.task, a.agent)
+					e.process(ctx, turns, a.task, a.agent, a.slot)
 					done <- a.agent.Name
 				}(a)
 			}
 		}
 
 		if len(busy) == 0 {
-			outcome := e.outcome(budget)
-			if outcome == RunWaiting && e.opts.WaitForReview {
-				select {
-				case <-e.wake:
-					continue
-				case <-e.pollTick():
-					continue
-				case <-ctx.Done():
-					e.setRunStatus(RunStopped)
-					return RunStopped, ctx.Err()
+			// With no worker of its own busy, a task recover left verifying or
+			// approved is stale once the merge lock is free.
+			if skipped {
+				if s, err := e.recover(); err == nil && !s {
+					skipped = false
+					continue // dispatch what it recovered
 				}
 			}
-			e.setRunStatus(outcome)
-			return outcome, nil
+			outcome, stuck := e.outcome(budget)
+			if outcome == RunCompleted {
+				if outcome, err := e.complete(ctx); outcome != "" {
+					return outcome, err
+				}
+				continue // the user accepted a proposal while the checks ran
+			}
+			if outcome != RunWaiting || !e.opts.WaitForReview { // otherwise it waits for approvals below
+				e.setRunStatus(outcome, stuck...)
+				return outcome, nil
+			}
 		}
 
 		select {
 		case name := <-done:
 			delete(busy, name)
 		case <-e.wake:
+		case <-e.pollTick(): // another process may have approved a task others wait for
 		case <-ctx.Done():
 			for len(busy) > 0 {
 				delete(busy, <-done)
@@ -258,22 +303,33 @@ func (e *Engine) Run(ctx context.Context) (string, error) {
 type assignment struct {
 	task  store.Task
 	agent store.RunAgent
+	slot  int // SWITCH_SLOT while the task runs
 }
 
 // Ready picks up to limit runnable tasks, in plan order, each with a distinct
-// idle worker. A retried task goes back to the worker that attempted it.
+// idle worker. A retried task goes back to the worker that attempted it. A
+// task whose file scope overlaps work started and not merged yet waits.
+// Explain says why the others wait.
+//
+// A task's slot is its agent's place in the run, from 1: each agent runs one
+// task at a time, so no two running tasks share one. Integration checks, one
+// at a time, have slot 0.
 func Ready(tasks []store.Task, agents []store.RunAgent, busy map[string]bool, limit int) []assignment {
 	merged := make(map[string]bool, len(tasks))
 	taken := make(map[string]bool, len(busy))
 	for name := range busy {
 		taken[name] = true
 	}
+	var started [][]string // file scopes of work started and not merged yet
 	for _, task := range tasks {
 		switch task.Status {
 		case StatusMerged, "done":
 			merged[task.ID] = true
 		case StatusRunning:
 			taken[task.Assignee] = true
+			started = append(started, scopePaths(task.Files))
+		case StatusVerifying, StatusReviewing, StatusReview, StatusApproved:
+			started = append(started, scopePaths(task.Files))
 		}
 	}
 
@@ -285,28 +341,89 @@ func Ready(tasks []store.Task, agents []store.RunAgent, busy map[string]bool, li
 		if task.Status != StatusQueued && task.Status != StatusInterrupted {
 			continue
 		}
-		if !depsMerged(task, merged) {
+		scope := scopePaths(task.Files)
+		if !depsMerged(task, merged) || clashes(scope, started) {
 			continue
 		}
-		// An assigned task goes back to its agent, whatever its role: the worker
-		// that attempted it, or whoever it was handed off to (the lead too).
 		assigned := task.Assignee != "" && hasAgent(agents, task.Assignee)
-		for _, agent := range agents {
-			if taken[agent.Name] {
-				continue
-			}
-			if assigned && agent.Name != task.Assignee {
-				continue
-			}
-			if !assigned && (agent.Role == "lead" || agent.Role != task.Role) {
+		for i, agent := range agents {
+			if taken[agent.Name] || !canTake(agent, task, assigned) {
 				continue
 			}
 			taken[agent.Name] = true
-			out = append(out, assignment{task: task, agent: agent})
+			started = append(started, scope)
+			out = append(out, assignment{task: task, agent: agent, slot: i + 1})
 			break
 		}
 	}
 	return out
+}
+
+// canTake reports whether agent may work on task: an assigned task goes back
+// to its agent, whatever its role: the worker that attempted it, or whoever
+// it was handed off to (the lead too). Others go to a worker of their role.
+func canTake(agent store.RunAgent, task store.Task, assigned bool) bool {
+	if assigned {
+		return agent.Name == task.Assignee
+	}
+	return agent.Role != "lead" && agent.Role == task.Role
+}
+
+// Explain gives, by task ID, the first reason each unfinished task that is
+// not under way cannot run now: what it waits for. budget is whether the run
+// has turns and tokens left. It follows Ready.
+func Explain(tasks []store.Task, agents []store.RunAgent, budget bool) map[string]string {
+	status := make(map[string]string, len(tasks))
+	busy := map[string]string{} // agent -> the task it works on
+	var started []store.Task    // work started and not merged yet
+	for _, task := range tasks {
+		status[task.ID] = task.Status
+		switch task.Status {
+		case StatusRunning, StatusVerifying, StatusReviewing:
+			busy[task.Assignee] = task.ID
+			started = append(started, task)
+		case StatusReview, StatusApproved:
+			started = append(started, task)
+		}
+	}
+	waits := func(task store.Task) string {
+		assigned := task.Assignee != "" && hasAgent(agents, task.Assignee)
+		if !assigned && !slices.ContainsFunc(agents, func(a store.RunAgent) bool { return canTake(a, task, false) }) {
+			return fmt.Sprintf("no %s worker in this run", task.Role)
+		}
+		for _, dep := range task.Deps {
+			if status[dep] != StatusMerged && status[dep] != "done" {
+				return fmt.Sprintf("waits for %s, which is %s", planID(dep), status[dep])
+			}
+		}
+		if !budget {
+			return "the run budget (max_turns or max_tokens) is used up"
+		}
+		for _, other := range started {
+			if clashes(scopePaths(task.Files), [][]string{scopePaths(other.Files)}) {
+				return fmt.Sprintf("waits for %s to merge: their files overlap", planID(other.ID))
+			}
+		}
+		if assigned && busy[task.Assignee] != "" {
+			return fmt.Sprintf("waits for %s, busy with %s", task.Assignee, planID(busy[task.Assignee]))
+		}
+		if !assigned && !slices.ContainsFunc(agents, func(a store.RunAgent) bool { return canTake(a, task, false) && busy[a.Name] == "" }) {
+			return fmt.Sprintf("every %s worker is busy", task.Role)
+		}
+		return "ready to run"
+	}
+	why := map[string]string{}
+	for _, task := range tasks {
+		switch task.Status {
+		case StatusBlocked:
+			why[task.ID] = "blocked: " + firstLine(task.LastError)
+		case StatusReview:
+			why[task.ID] = "waits for your review"
+		case StatusQueued, StatusInterrupted:
+			why[task.ID] = waits(task)
+		}
+	}
+	return why
 }
 
 func depsMerged(task store.Task, merged map[string]bool) bool {
@@ -316,6 +433,31 @@ func depsMerged(task store.Task, merged map[string]bool) bool {
 		}
 	}
 	return true
+}
+
+// clashes reports whether a file scope overlaps any of others, so the tasks
+// would likely conflict when merged.
+func clashes(scope []string, others [][]string) bool {
+	for _, other := range others {
+		if _, ok := overlap(scope, other); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// scopePaths turns a task's file scope, paths and globs, into paths for
+// overlap: a glob stands for the directory all its matches are in. No scope
+// claims nothing.
+func scopePaths(files []string) []string {
+	paths := make([]string, len(files))
+	for i, file := range files {
+		if j := strings.IndexAny(file, "*?[{"); j >= 0 {
+			file = filepath.Dir(file[:j])
+		}
+		paths[i] = filepath.Clean(file)
+	}
+	return paths
 }
 
 func hasAgent(agents []store.RunAgent, name string) bool {
@@ -357,34 +499,54 @@ func (e *Engine) dispatch(busy map[string]bool, limit int) []assignment {
 		}
 		task.Status = StatusRunning
 		task.Assignee = a.agent.Name
-		task.Attempts++
-		task.LastError = ""
-		if !e.save(ctx, task, a.agent.Name, fmt.Sprintf("attempt %d", task.Attempts)) {
+		if a.task.Status != StatusInterrupted { // a stop, quit or crash cut it short; it resumes
+			task.Attempts++
+		}
+		task.LastError, task.Summary = "", ""
+		if e.claim(ctx, task, a.task.Status, a.agent.Name, fmt.Sprintf("attempt %d", task.Attempts)) != nil {
 			continue
 		}
-		started = append(started, assignment{task: task, agent: a.agent})
+		a.task = task
+		started = append(started, a)
 	}
 	return started
 }
 
 // recover returns tasks a crashed process left mid-flight to a resumable state.
+// It reports whether it left any verifying or approved task as it was, because
+// the merge lock was held: Run calls it again then, once its own workers are idle.
 // shortcut: assumes one Switch process drives a run; add run ownership (a
 // lock file next to the control socket) before allowing several.
-func (e *Engine) recover() error {
+func (e *Engine) recover() (bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	ctx, cancel := saveContext()
 	defer cancel()
+	// An approved task belongs to the approval holding the merge lock, and a
+	// verifying one may be a fix by hand that /fix checks under it. With the
+	// lock free that approval died, and the integration branch never took its
+	// unverified merge, so the user can simply approve again. The lock is taken
+	// before the tasks are read, so no approval finishes in between.
+	merge, _ := TryLockMerge(e.run.IntegrationPath)
+	defer merge.Release()
 	tasks, err := e.opts.Store.TasksForRun(ctx, e.run.ID)
 	if err != nil {
-		return err
+		return false, err
 	}
+	skipped := false
 	for _, task := range tasks {
 		switch task.Status {
 		case StatusRunning, StatusVerifying, StatusReviewing:
+			if task.Status == StatusVerifying && merge == nil {
+				skipped = true
+				continue
+			}
 			task.Status = StatusInterrupted
 		case StatusApproved:
-			// Merging is idempotent, so the user can approve again.
+			if merge == nil {
+				skipped = true
+				continue
+			}
 			task.Status = StatusReview
 		default:
 			continue
@@ -392,19 +554,53 @@ func (e *Engine) recover() error {
 		e.save(ctx, task, task.Assignee, "recovered after restart")
 	}
 	e.recoverSubagents(ctx)
-	return nil
+	return skipped, nil
 }
 
-func (e *Engine) outcome(budget bool) string {
+// complete runs the run's own checks once more on a run whose tasks are all
+// merged, and records how it ends: completed, blocked when they fail, or
+// stopped when ctx ends first. It returns "" when a task came up meanwhile,
+// such as a proposal the user accepted, so the run goes on.
+func (e *Engine) complete(ctx context.Context) (string, error) {
+	err := e.checkRun(ctx)
+	switch {
+	case ctx.Err() != nil:
+		e.setRunStatus(RunStopped)
+		return RunStopped, ctx.Err()
+	case err != nil:
+		e.setRunStatus(RunBlocked, firstLine(err.Error()))
+		return RunBlocked, err
+	}
+	outcome, stuck := e.outcome(true) // the budget words only queued tasks' waits, and a completed run has none
+	if outcome != RunCompleted {
+		return "", nil
+	}
+	e.setRunStatus(outcome, stuck...)
+	return outcome, nil
+}
+
+// outcome is where the run stands once no task is running, and why each
+// unfinished task waits, in plan order.
+func (e *Engine) outcome(budget bool) (string, []string) {
 	ctx, cancel := saveContext()
 	defer cancel()
 	tasks, _ := e.opts.Store.TasksForRun(ctx, e.run.ID)
+	agents, _ := e.opts.Store.RunAgents(ctx, e.run.ID)
+	why := Explain(tasks, agents, budget)
+	var stuck []string
 	all, waiting, pending := true, false, false
 	for _, task := range tasks {
+		if why[task.ID] != "" {
+			stuck = append(stuck, planID(task.ID)+": "+why[task.ID])
+		}
 		switch task.Status {
 		case StatusMerged, "done":
 			continue
-		case StatusReview, StatusApproved, StatusReviewing:
+		case StatusBlocked:
+			if strings.HasPrefix(task.LastError, ProposedBy) {
+				continue
+			}
+		case StatusReview, StatusApproved, StatusReviewing, StatusVerifying: // with no worker on it, verifying is a fix by hand
 			waiting = true
 		case StatusQueued, StatusInterrupted:
 			pending = true
@@ -413,13 +609,13 @@ func (e *Engine) outcome(budget bool) string {
 	}
 	switch {
 	case all:
-		return RunCompleted
+		return RunCompleted, stuck
 	case waiting:
-		return RunWaiting
+		return RunWaiting, stuck
 	case pending && !budget:
-		return RunBudget
+		return RunBudget, stuck
 	default:
-		return RunBlocked
+		return RunBlocked, stuck
 	}
 }
 
@@ -449,16 +645,36 @@ func (e *Engine) budgetLeft() (bool, error) {
 
 // save persists a transition, logs it, and notifies the UI. Callers hold mu or
 // own the task exclusively.
-func (e *Engine) save(ctx context.Context, task store.Task, agent, message string) bool {
+func (e *Engine) save(ctx context.Context, task store.Task, agent, message string) {
 	if err := e.opts.Store.SaveTask(ctx, task); err != nil {
-		return false
+		return
 	}
+	e.logStatus(ctx, task, agent, message)
+}
+
+// claim saves a transition out of from, a status that other engines and
+// processes may act on too, unless one of them moved the task first.
+func (e *Engine) claim(ctx context.Context, task store.Task, from, agent, message string) error {
+	ok, err := e.opts.Store.SaveTaskFrom(ctx, task, from)
+	if err == nil && !ok {
+		err = fmt.Errorf("task %s is no longer %s; it changed meanwhile", planID(task.ID), from)
+	}
+	if err != nil {
+		return err
+	}
+	e.logStatus(ctx, task, agent, message)
+	return nil
+}
+
+func (e *Engine) logStatus(ctx context.Context, task store.Task, agent, message string) {
 	text := task.Status
 	if message != "" {
 		text += ": " + message
 	}
 	e.log(ctx, task.ID, agent, "status", text)
-	return true
+	if task.Status == StatusReview || task.Status == StatusBlocked {
+		e.notify(task.Status, task.ID, task.Title+": "+message)
+	}
 }
 
 func (e *Engine) log(ctx context.Context, taskID, agent, kind, message string) {
@@ -468,11 +684,26 @@ func (e *Engine) log(ctx context.Context, taskID, agent, kind, message string) {
 	}
 }
 
-func (e *Engine) setRunStatus(status string) {
+// setRunStatus records the run's status, and in its log entry why, such as
+// what each unfinished task waits for.
+func (e *Engine) setRunStatus(status string, why ...string) {
 	ctx, cancel := saveContext()
 	defer cancel()
 	_ = e.opts.Store.SetRunStatus(ctx, e.run.ID, status)
+	event := ""
+	switch status {
+	case RunCompleted:
+		event = "completed"
+	case RunBlocked, RunBudget: // the budget holds the run until the user raises it
+		event = RunBlocked
+	}
+	if len(why) > 0 {
+		status += ": " + strings.Join(why, "; ")
+	}
 	e.log(ctx, "", "", "run", status)
+	if event != "" {
+		e.notify(event, "", "run "+status)
+	}
 }
 
 // pollTick fires after Poll, or never when polling is off.
@@ -489,6 +720,9 @@ func (e *Engine) signal() {
 	default:
 	}
 }
+
+// Wake has the run look at its tasks again now, such as after one was added.
+func (e *Engine) Wake() { e.signal() }
 
 // saveContext outlives a cancelled run so outcomes are still recorded.
 func saveContext() (context.Context, context.CancelFunc) {

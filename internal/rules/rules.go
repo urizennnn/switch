@@ -8,9 +8,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
+	"unicode"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/urizennnn/switch/internal/config"
 )
 
@@ -34,7 +36,8 @@ type Set struct {
 
 	cfg       config.RulesConfig // where the set came from, so it can be reloaded
 	loaded    bool
-	noProject bool // the user declined this project's rules
+	noProject bool                   // the user declined this project's rules
+	trusted   func() (string, error) // hash of the project rules the user accepted; see Trust
 }
 
 // File is a rule file a person can edit, whether or not it exists yet.
@@ -70,6 +73,7 @@ func (s Set) Reload() (Set, error) {
 	if err != nil {
 		return Set{}, err
 	}
+	next.trusted = s.trusted
 	if s.noProject {
 		next = next.WithoutProject()
 	}
@@ -79,7 +83,8 @@ func (s Set) Reload() (Set, error) {
 // Scoped rereads base and adds the role, agent, and task rules for one agent.
 // Lead-only guidance belongs in roles/lead.md, which workers never receive.
 // Names come from config and lead-written plans, so ones that would escape
-// the rules directory are ignored.
+// the rules directory are ignored. Project rules the user has not accepted
+// are left out (see Trust).
 func Scoped(base Set, role, agent, task string) (Set, error) {
 	set, err := base.Reload()
 	if err != nil {
@@ -98,11 +103,80 @@ func Scoped(base Set, role, agent, task string) (Set, error) {
 				return Set{}, err
 			}
 		}
-		if err := set.add(filepath.Join(project, level.kind, name+".md"), label); err != nil {
-			return Set{}, err
+		if project != "" {
+			if err := set.add(filepath.Join(project, level.kind, name+".md"), label); err != nil {
+				return Set{}, err
+			}
 		}
 	}
+	if set.Untrusted() {
+		return set.WithoutProject(), nil
+	}
 	return set, nil
+}
+
+// Subagent is what a worker's subagent gets: the worker's rules (Scoped)
+// plus roles/subagent.md. When a rule file cannot be read it gets the global
+// rules only, so unchecked project rules are never sent.
+func Subagent(base Set, role, agent, task string) Set {
+	set, err := Scoped(base, role, agent, task)
+	if err != nil {
+		return base.WithoutProject()
+	}
+	if extra, err := Scoped(base, "subagent", "", ""); err == nil {
+		for _, source := range extra.Sources {
+			if strings.HasSuffix(source.Scope, "role:subagent") {
+				set.Sources = append(set.Sources, source)
+			}
+		}
+	}
+	return set
+}
+
+// Trust makes Scoped send the project's rules only while trusted returns the
+// hash of exactly the files on disk, so a change, even one made mid-session,
+// is left out until the user accepts it. An error counts as a change.
+func (s Set) Trust(trusted func() (string, error)) Set {
+	s.trusted = trusted
+	return s
+}
+
+// UntrustedNote tells someone using a command, which has no review panel,
+// why project rules were left out.
+const UntrustedNote = "project rules left out: you have not accepted them as they are now; open switch in this folder to review them"
+
+// Untrusted reports whether the set holds project rules the user has not
+// accepted as they are now on disk; Scoped leaves those out.
+func (s Set) Untrusted() bool {
+	if s.trusted == nil || s.noProject {
+		return false
+	}
+	project, err := Project(s)
+	if err != nil {
+		return true
+	}
+	for _, source := range s.Sources {
+		reviewed := func(p Source) bool { return p.Text == source.Text && sameFile(p.Path, source.Path) }
+		if !strings.HasPrefix(source.Scope, "global") && !slices.ContainsFunc(project.Sources, reviewed) {
+			return true // not a reviewed file as it is now, so not what the hash below covers
+		}
+	}
+	if project.Empty() {
+		return false
+	}
+	hash, err := s.trusted()
+	return err != nil || hash != project.Hash()
+}
+
+// sameFile also matches one file named two ways, as on a case-insensitive
+// file system (the macOS default), where agent Claude reads agents/claude.md.
+func sameFile(a, b string) bool {
+	if a == b {
+		return true
+	}
+	x, errX := os.Stat(a)
+	y, errY := os.Stat(b)
+	return errX == nil && errY == nil && os.SameFile(x, y)
 }
 
 // Project reads every rule file in the project, used to show a project's
@@ -153,7 +227,7 @@ func (s Set) Files() (global, project []File) {
 	return global, project
 }
 
-// Target resolves a rule file name, as used by `switch rules edit` and the
+// Target resolves a rule file name, as used by `switch __control rules edit` and the
 // /rules manager: global, project, local, roles/<name>, agents/<name>,
 // tasks/<name>, global/roles/<name>, or global/agents/<name>.
 func (s Set) Target(target string) (string, error) {
@@ -192,7 +266,7 @@ func (s Set) globalFile() string {
 	if s.cfg.IgnoreGlobal {
 		return ""
 	}
-	return expandHome(s.cfg.Global)
+	return s.cfg.Global // config.Load makes it absolute
 }
 
 func (s Set) projectFile(path string) string {
@@ -220,12 +294,12 @@ func file(scope, path string) File {
 }
 
 func listDir(dir, kind, prefix string) []File {
-	paths, _ := filepath.Glob(filepath.Join(dir, kind, "*.md"))
-	sort.Strings(paths)
-	files := make([]File, 0, len(paths))
-	for _, path := range paths {
-		name := strings.TrimSuffix(filepath.Base(path), ".md")
-		files = append(files, File{Scope: prefix + strings.TrimSuffix(kind, "s") + ":" + name, Path: path, Exists: true})
+	entries, _ := os.ReadDir(filepath.Join(dir, kind)) // not a glob: dir may contain [ ] * ?
+	var files []File
+	for _, entry := range entries {
+		if name, ok := strings.CutSuffix(entry.Name(), ".md"); ok {
+			files = append(files, File{Scope: prefix + strings.TrimSuffix(kind, "s") + ":" + name, Path: filepath.Join(dir, kind, entry.Name()), Exists: true})
+		}
 	}
 	return files
 }
@@ -277,7 +351,7 @@ func (s Set) Hash() string {
 	return hex.EncodeToString(sum.Sum(nil))
 }
 
-// Text returns the merged rules for display.
+// Text returns the merged rules, as people review them and agents get them.
 func (s Set) Text() string {
 	if len(s.Sources) == 0 {
 		return ""
@@ -289,7 +363,22 @@ func (s Set) Text() string {
 		}
 		fmt.Fprintf(&b, "## %s rules (%s)\n\n%s", source.Scope, source.Path, source.Text)
 	}
-	return b.String()
+	return clean(b.String())
+}
+
+// clean drops terminal escapes and characters that do not show (controls
+// other than newline and tab, format characters such as bidi overrides and
+// tags, variation selectors), so they cannot hide text from the review.
+func clean(text string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Variation_Selector) {
+			return -1
+		}
+		return r
+	}, ansi.Strip(text))
 }
 
 // Prompt prepends the effective rules to a user message. ACP has no stable
@@ -304,23 +393,6 @@ func (s Set) Prompt(user string) string {
 	b.WriteString("\n\nUser request:\n")
 	b.WriteString(user)
 	return b.String()
-}
-
-func expandHome(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
-	}
-	if path == "~" || strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			if path == "~" {
-				return home
-			}
-			return filepath.Join(home, strings.TrimPrefix(path, "~/"))
-		}
-	}
-	return path
 }
 
 // Editor returns the command that opens path in the user's editor ($VISUAL,

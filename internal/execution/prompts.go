@@ -29,9 +29,20 @@ func WorkerPrompt(task store.Task, agent store.RunAgent, ruleSet rules.Set) stri
 	writeRules(&b, ruleSet)
 	b.WriteString("\nDo not commit, push, merge, or switch branches; Switch commits and integrates approved work.\n")
 	b.WriteString("Report through the switch MCP tools (switch_progress, switch_complete, switch_block) if they are available,\n")
-	b.WriteString("or with `$SWITCH_BIN __control agent progress|complete|block <message>`. If the task cannot be done, block it and say why.\n")
+	b.WriteString("or with `$SWITCH_BIN __control agent progress|complete|block <message>`. For a decision only the user can make, ask with switch_question;\n")
+	b.WriteString("if the task cannot be done, block it and say why.\n")
+	b.WriteString("Any other switch_ tool works from the shell too, with its arguments as JSON: `$SWITCH_BIN __control agent handoff '{\"to\": \"<agent>\", \"message\": \"...\"}'`.\n")
 	b.WriteString("When you are done, reply with a short summary of what you changed and anything left open.\n")
 	return b.String()
+}
+
+// envNote tells a worker what its environment and checks have to keep its
+// task apart from others running at once.
+func envNote(env []string) string {
+	return fmt.Sprintf(`
+You and the verification commands run with %s set. SWITCH_SLOT is unique among the tasks running at once:
+derive ports, test databases and container names from it, so parallel tasks do not collide.
+`, strings.Join(env, ", "))
 }
 
 // subagentNote tells a worker it may start subagents and that it owns them.
@@ -67,13 +78,14 @@ func SubagentPrompt(task store.Task, sub store.Subagent, ruleSet rules.Set) stri
 }
 
 // ReviewPrompt asks the lead to review one verified task.
-func ReviewPrompt(task store.Task, diff, evidence string, ruleSet rules.Set) string {
+func ReviewPrompt(task store.Task, worker store.RunAgent, diff, evidence string, ruleSet rules.Set) string {
 	if len(diff) > maxReviewDiff {
 		diff = diff[:maxReviewDiff] + "\n… (diff truncated)"
 	}
 	var b strings.Builder
 	b.WriteString("You are the lead of a Switch run. Review this change; do not edit files.\n\n")
 	fmt.Fprintf(&b, "Task: %s\n\n%s\n", task.Title, task.Brief)
+	fmt.Fprintf(&b, "\nWorker: %s (%s)\n", worker.Name, worker.Driver)
 	writeList(&b, "Acceptance criteria", task.Acceptance)
 	fmt.Fprintf(&b, "\nVerification evidence:\n%s\n", evidence)
 	if task.Summary != "" {

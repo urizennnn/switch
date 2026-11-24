@@ -11,11 +11,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/driver/acpdriver"
 	"github.com/urizennnn/switch/internal/planning"
 )
 
-// Run executes `switch plan` and returns a process exit code.
+// Run executes `switch __control plan` and returns a process exit code.
 func Run(args []string) int {
 	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -24,15 +25,15 @@ func Run(args []string) int {
 	cwd := fs.String("cwd", ".", "project directory")
 	file := fs.String("file", "", "import a plan JSON file instead of asking the lead")
 	timeout := fs.Duration("timeout", 10*time.Minute, "lead planning timeout")
-	permission := fs.String("permission", "deny", "lead permission mode: ask, allow, or deny")
+	permission := fs.String("permission", "deny", "lead permission mode: allow or deny")
 	agentLogs := fs.Bool("agent-logs", false, "stream lead adapter stderr")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	mode, err := acpdriver.ParsePermissionMode(*permission)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "plan: %v\n", err)
+	if err != nil || mode == acpdriver.PermissionAsk {
+		fmt.Fprintln(os.Stderr, "plan: --permission must be allow or deny headless")
 		return 2
 	}
 
@@ -41,6 +42,7 @@ func Run(args []string) int {
 		fmt.Fprintf(os.Stderr, "plan: %v\n", err)
 		return 1
 	}
+	project = config.ProjectRoot(project)
 
 	goal := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if goal == "" && *file == "" {
@@ -89,6 +91,9 @@ func Run(args []string) int {
 			deps = strings.Join(task.Deps, ",")
 		}
 		fmt.Printf("  %-12s %-8s deps=%-12s %s\n", task.ID, task.Role, deps, task.Title)
+	}
+	if result.Uncommitted > 0 {
+		fmt.Printf("\nwarning: %d uncommitted changes are not in this run; workers start from the last commit\n", result.Uncommitted)
 	}
 	fmt.Printf("\nrun saved. worktrees: %s\n", result.Root)
 	fmt.Println("start it with /run in the TUI or `switch __control run`.")

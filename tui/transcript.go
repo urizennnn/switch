@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -36,7 +37,7 @@ const (
 type entry struct {
 	kind entryKind
 	text string
-	who  string // the asker of a user entry; "" is you
+	who  string // the asker of a user entry, "" for you; a teammate answering you, for a reply
 	open bool   // reply or thought still streaming
 
 	// tool calls
@@ -51,9 +52,10 @@ type entry struct {
 
 	start, end time.Time // thinking time
 
-	rendered string // cached render for width and text length
+	rendered string // cached render, wrapped, for width, text length and toggle
 	width    int
 	length   int
+	shown    bool // ctrl+t for a thought, ctrl+e for a tool
 }
 
 var (
@@ -161,6 +163,17 @@ func addNote(list *[]entry, kind entryKind, text string) {
 	*list = append(*list, entry{kind: kind, text: text})
 }
 
+// addAside adds an entry from outside the agent's turn, such as a teammate's
+// answer to an @mention, above a reply or thought still streaming, which goes
+// on at the end.
+func addAside(list *[]entry, e entry) {
+	i := len(*list)
+	if i > 0 && (*list)[i-1].open {
+		i--
+	}
+	*list = slices.Insert(*list, i, e)
+}
+
 func planItems(plan []acpdriver.PlanEntry) []string {
 	items := make([]string, 0, len(plan))
 	for _, entry := range plan {
@@ -240,13 +253,12 @@ func (m *model) appendSystem(text string) { addNote(&m.entries, entrySystem, tex
 
 func (m *model) appendError(text string) { addNote(&m.entries, entryError, text) }
 
-// refreshViewport redraws the conversation, following new output unless the
-// user has scrolled up.
+// refreshViewport redraws the conversation. The main pane shows its end
+// unless the user has scrolled back (chatTop).
 func (m *model) refreshViewport() {
-	follow := m.viewport.AtBottom() || m.viewport.TotalLineCount() == 0
-	m.viewport.SetContent(terminalansi.Hardwrap(m.renderTranscript(m.viewport.Width()), m.viewport.Width(), true))
-	if follow {
-		m.viewport.GotoBottom()
+	m.chatLines = strings.Split(m.renderTranscript(m.chatWidth()), "\n")
+	if m.chatTop >= len(m.chatLines)-m.chatRoom() {
+		m.chatTop = -1 // it shrank, as a new session does: the end is in view, so follow it
 	}
 }
 
@@ -255,9 +267,16 @@ func (m *model) renderTranscript(width int) string {
 	if label == "" {
 		label = "lead"
 	}
-	out := renderEntries(m.entries, max(20, width), label, m.frame, m.showThoughts, m.showCommands)
+	width = max(20, width)
+	out := renderEntries(m.entries, width, label, m.frame, m.showThoughts, m.showCommands)
 	if m.busy && m.state == "working" {
-		out += "\n\n" + activityLine(activity(m.entries), m.turnStarted, m.frame, "esc to stop")
+		out += "\n\n" + terminalansi.Truncate(activityLine(activity(m.entries), m.turnStarted, m.frame, "esc to stop"), width, "…")
+	}
+	if m.queued != "" {
+		if out != "" {
+			out += "\n\n"
+		}
+		out += askBarStyle.Width(max(20, width)).Render(userMarkerStyle.Render("you · queued") + "\n" + mutedStyle.Render(m.queued))
 	}
 	if out == "" {
 		return systemStyle.Render("New session. Type a message below, or / for commands.")
@@ -289,12 +308,13 @@ func elapsed(start time.Time) string {
 	return "0s"
 }
 
-// renderEntries renders a transcript. Closed entries are cached; open ones
-// re-render only when their text grew.
+// renderEntries renders a transcript wrapped to width. Each entry's render is
+// cached until it changes; only a running tool, whose spinner moves with
+// frame, renders every time.
 func renderEntries(entries []entry, width int, label string, frame int, showThoughts bool, showCommands ...bool) string {
 	var b strings.Builder
 	commandsOpen := len(showCommands) > 0 && showCommands[0]
-	labelled := false // the agent label is shown once per turn
+	labelled, speaker := false, "" // the agent label is shown once per turn and speaker
 	for i := range entries {
 		e := &entries[i]
 		if e.kind == entryTool && e.output != "" && (!isCommand(*e) || commandsOpen) && (e.outputRendered == "" || e.outputWidth != width) {
@@ -310,7 +330,7 @@ func renderEntries(entries []entry, width int, label string, frame int, showThou
 		case entryUser:
 			labelled = false
 		case entryAssistant:
-			continued, labelled = labelled, true
+			continued, labelled, speaker = labelled && speaker == e.who, true, e.who
 		}
 		if i > 0 {
 			// Consecutive tool lines stay together.
@@ -319,19 +339,32 @@ func renderEntries(entries []entry, width int, label string, frame int, showThou
 			}
 			b.WriteString("\n")
 		}
-		switch {
-		case e.kind == entryTool:
+		if e.kind == entryTool && running(e.status) {
 			b.WriteString(renderTool(*e, width, frame, commandsOpen))
-		case e.kind == entryThought:
-			b.WriteString(renderThought(*e, width, showThoughts))
-		default:
-			if e.rendered == "" || e.width != width || e.length != len(e.text) {
-				e.rendered, e.width, e.length = renderEntry(*e, width, label, continued), width, len(e.text)
+			continue
+		}
+		shown := e.kind == entryThought && showThoughts || e.kind == entryTool && commandsOpen
+		if e.rendered == "" || e.width != width || e.length != len(e.text) || e.shown != shown {
+			var out string
+			switch e.kind {
+			case entryTool:
+				out = renderTool(*e, width, frame, commandsOpen)
+			case entryThought:
+				out = renderThought(*e, width, showThoughts)
+			default:
+				out = renderEntry(*e, width, label, continued)
 			}
-			b.WriteString(e.rendered)
-			if e.kind == entryAssistant && e.open && frame%8 < 5 {
-				b.WriteString(brandStyle.Render(" ▍"))
+			// Wrapped once here rather than the whole transcript on every
+			// redraw: markdown keeps long words and URLs whole.
+			e.rendered, e.width, e.length, e.shown = terminalansi.Hardwrap(out, width, true), width, len(e.text), shown
+		}
+		b.WriteString(e.rendered)
+		if e.kind == entryAssistant && e.open {
+			cursor := " " // a line of its own: markdown pads its lines to width
+			if frame%8 < 5 {
+				cursor = brandStyle.Render(" ▍")
 			}
+			b.WriteString("\n" + cursor)
 		}
 	}
 	return b.String()
@@ -355,6 +388,9 @@ func renderEntry(e entry, width int, label string, continued bool) string {
 	case entryAssistant:
 		if continued {
 			return renderMarkdown(e.text, width)
+		}
+		if e.who != "" {
+			label = e.who
 		}
 		return leadLabelStyle.Render(label) + "\n" + renderMarkdown(e.text, width)
 	case entryTool:
@@ -400,10 +436,12 @@ func renderTool(e entry, width, frame int, showCommands ...bool) string {
 		head += errorStyle.Render(" failed")
 	}
 	result := "  " + mark + " " + head
-	if e.output != "" {
-		if isCommand(e) && (len(showCommands) == 0 || !showCommands[0]) {
-			return result + dimStyle.Render(fmt.Sprintf(" · %d lines · ctrl+e to show", len(strings.Split(strings.TrimSuffix(e.output, "\n"), "\n"))))
-		}
+	collapsed := e.output != "" && isCommand(e) && (len(showCommands) == 0 || !showCommands[0])
+	if collapsed {
+		result += dimStyle.Render(fmt.Sprintf(" · %d lines · ctrl+e to show", len(strings.Split(strings.TrimSuffix(e.output, "\n"), "\n"))))
+	}
+	result = terminalansi.Truncate(result, width, "…") // a long title stays on its line, running or not
+	if e.output != "" && !collapsed {
 		output := e.outputRendered
 		if output == "" || e.outputWidth != width {
 			language := "text"
@@ -478,13 +516,32 @@ func transcriptStyle() ansi.StyleConfig {
 // renderMarkdown renders agent output; it falls back to plain wrapped text if
 // the markdown cannot be rendered.
 func renderMarkdown(text string, width int) string {
+	var out []string
+	for _, part := range splitFences(text) {
+		if part.code {
+			out = append(out, renderCodeBlock(part.language, part.text, width, part.closed))
+		} else if s := renderMarkdownPlain(part.text, width); s != "" {
+			out = append(out, s)
+		}
+	}
+	return strings.Join(out, "\n\n")
+}
+
+// mdPart is a run of markdown prose, or one fenced code block.
+type mdPart struct {
+	code, closed bool
+	language     string
+	text         string
+}
+
+// splitFences splits markdown into prose and its fenced code blocks, in order.
+func splitFences(text string) []mdPart {
 	lines := strings.Split(text, "\n")
-	var parts, prose []string
+	var parts []mdPart
+	var prose []string
 	flush := func() {
 		if len(prose) > 0 {
-			if s := renderMarkdownPlain(strings.Join(prose, "\n"), width); s != "" {
-				parts = append(parts, s)
-			}
+			parts = append(parts, mdPart{text: strings.Join(prose, "\n")})
 			prose = nil
 		}
 	}
@@ -516,10 +573,34 @@ func renderMarkdown(text string, width int) string {
 			}
 			code = append(code, lines[i])
 		}
-		parts = append(parts, renderCodeBlock(language, strings.Join(code, "\n"), width, closed))
+		parts = append(parts, mdPart{code: true, closed: closed, language: language, text: strings.Join(code, "\n")})
 	}
 	flush()
-	return strings.Join(parts, "\n\n")
+	return parts
+}
+
+// lastReply is the newest reply in the transcript on screen, or with code,
+// the newest fenced code block in its replies; "" when there is none.
+func (m model) lastReply(code bool) string {
+	entries := m.entries
+	if m.focus != "" {
+		entries = m.agentEntries[m.focus]
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].kind != entryAssistant {
+			continue
+		}
+		if !code {
+			return entries[i].text
+		}
+		parts := splitFences(entries[i].text)
+		for j := len(parts) - 1; j >= 0; j-- {
+			if parts[j].code {
+				return parts[j].text
+			}
+		}
+	}
+	return ""
 }
 
 func renderCodeBlock(language, code string, width int, closed bool) string {

@@ -3,12 +3,14 @@
 package rulescli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 
 	"github.com/urizennnn/switch/internal/config"
 	"github.com/urizennnn/switch/internal/rules"
+	"github.com/urizennnn/switch/internal/store"
 )
 
 const usage = `usage: switch __control rules [list]
@@ -25,7 +27,7 @@ func Run(args []string) int {
 		fmt.Fprintln(os.Stderr, "switch:", err)
 		return 1
 	}
-	if err := run(project, args, os.Stdout); err != nil {
+	if err := run(config.ProjectRoot(project), args, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "switch:", err)
 		return 1
 	}
@@ -57,13 +59,25 @@ func run(project string, args []string, stdout io.Writer) error {
 		}
 		return nil
 	case command == "show":
-		name := cfg.LeadAgent().Name
+		state, err := store.Open(config.StatePath())
+		if err != nil {
+			return err
+		}
+		defer state.Close()
+		ctx := context.Background()
+		// Show what agents are sent: project rules only as the user accepted them.
+		base = base.Trust(func() (string, error) { return state.TrustedRules(ctx, project) })
+		lead := leadName(ctx, state, project, cfg)
+		name := lead
 		if len(args) > 1 {
 			name = args[1]
 		}
-		set, err := Effective(base, cfg, name)
+		set, err := Effective(base, cfg, lead, name)
 		if err != nil {
 			return err
+		}
+		if base.Untrusted() {
+			fmt.Fprintln(os.Stderr, rules.UntrustedNote)
 		}
 		if set.Empty() {
 			fmt.Fprintf(stdout, "%s gets no rules\n", name)
@@ -93,16 +107,29 @@ func run(project string, args []string, stdout io.Writer) error {
 
 // Effective is what a configured agent is sent in chat: the lead gets
 // roles/lead.md, everyone else their own role's rules.
-func Effective(base rules.Set, cfg config.Config, name string) (rules.Set, error) {
+func Effective(base rules.Set, cfg config.Config, lead, name string) (rules.Set, error) {
 	for _, agent := range cfg.Fleet() {
 		if agent.Name != name {
 			continue
 		}
 		role := agent.Role
-		if name == cfg.LeadAgent().Name {
+		if name == lead {
 			role = "lead"
 		}
 		return rules.Scoped(base, role, name, "")
 	}
 	return rules.Set{}, fmt.Errorf("no configured agent named %q", name)
+}
+
+// leadName is the agent leading the project's chat: the one chosen with
+// /lead, else the configured lead.
+func leadName(ctx context.Context, state *store.Store, project string, cfg config.Config) string {
+	if name, ok, _ := state.LeadAgent(ctx, project); ok {
+		for _, agent := range cfg.Fleet() {
+			if agent.Name == name {
+				return name
+			}
+		}
+	}
+	return cfg.LeadAgent().Name
 }

@@ -13,6 +13,7 @@ import (
 
 type Manager struct {
 	Repo     string
+	Prefix   string // the project's directory inside Repo, such as "packages/api/"; "" at its root
 	StateDir string
 }
 
@@ -28,19 +29,20 @@ func New(ctx context.Context, repo, stateDir string) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	root, err := gitOutput(ctx, repo, "rev-parse", "--show-toplevel")
+	out, err := Git(ctx, repo, "rev-parse", "--show-toplevel", "--show-prefix")
 	if err != nil {
 		return nil, fmt.Errorf("%s is not a git repository: %w", repo, err)
 	}
+	root, prefix, _ := strings.Cut(out, "\n")
 	stateDir, err = filepath.Abs(stateDir)
 	if err != nil {
 		return nil, err
 	}
-	return &Manager{Repo: strings.TrimSpace(root), StateDir: stateDir}, nil
+	return &Manager{Repo: root, Prefix: prefix, StateDir: stateDir}, nil
 }
 
 func (m *Manager) Head(ctx context.Context) (string, error) {
-	return gitOutput(ctx, m.Repo, "rev-parse", "HEAD")
+	return Git(ctx, m.Repo, "rev-parse", "HEAD")
 }
 
 // Root is the per-run directory holding all worktrees.
@@ -64,6 +66,16 @@ func (m *Manager) Integration(ctx context.Context, runID, base string) (Worktree
 func (m *Manager) Create(ctx context.Context, runID, name, base string) (Worktree, error) {
 	branch := "switch/" + safe(runID) + "/" + safe(name)
 	path := filepath.Join(m.Root(runID), safe(name))
+	// A crash or a failed save between creating a worktree and recording it
+	// leaves it behind, with no work in it yet. If git was stopped halfway it
+	// is still locked, which blocks its removal, and partly checked out.
+	if head, err := Git(ctx, path, "symbolic-ref", "--short", "HEAD"); err == nil && head == branch {
+		_, _ = Git(ctx, m.Repo, "worktree", "unlock", path) // fails when it is not locked
+		if _, err := Git(ctx, path, "reset", "--hard"); err != nil {
+			return Worktree{}, err
+		}
+		return Worktree{Path: path, Branch: branch}, nil
+	}
 	if err := m.add(ctx, branch, path, base); err != nil {
 		return Worktree{}, err
 	}
@@ -80,7 +92,7 @@ func (m *Manager) add(ctx context.Context, branch, path, base string) error {
 	if strings.TrimSpace(base) == "" {
 		base = "HEAD"
 	}
-	_, err := gitOutput(ctx, m.Repo, "worktree", "add", "-b", branch, path, base)
+	_, err := Git(ctx, m.Repo, "worktree", "add", "-b", branch, path, base)
 	if err != nil {
 		return fmt.Errorf("create worktree %s: %w", branch, err)
 	}
@@ -88,18 +100,23 @@ func (m *Manager) add(ctx context.Context, branch, path, base string) error {
 }
 
 func (m *Manager) Remove(ctx context.Context, path string) error {
-	_, err := gitOutput(ctx, m.Repo, "worktree", "remove", "--force", path)
+	_, err := Git(ctx, m.Repo, "worktree", "remove", "--force", path)
 	if err != nil {
-		_, _ = gitOutput(ctx, m.Repo, "worktree", "prune")
+		_, _ = Git(ctx, m.Repo, "worktree", "prune")
 	}
 	return err
 }
 
-func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
+// Git runs git in dir and returns its stdout, trimmed. Its stderr, such as a
+// warning about a broken branch, stays out of what callers parse and goes
+// into the error.
+func Git(ctx context.Context, dir string, args ...string) (string, error) {
+	var stderr strings.Builder
 	command := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	output, err := command.CombinedOutput()
+	command.Stderr = &stderr
+	output, err := command.Output()
 	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)+stderr.String()))
 	}
 	return strings.TrimSpace(string(output)), nil
 }

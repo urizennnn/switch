@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -37,9 +38,8 @@ type saveResultMsg struct {
 }
 
 type doctorResultMsg struct {
-	report    string
-	available bool
-	err       error
+	report string
+	err    error
 }
 
 type newSessionResultMsg struct {
@@ -80,15 +80,24 @@ func waitForActivity(session *acpdriver.Session, gen int, stop <-chan struct{}) 
 		case request := <-session.Permissions():
 			return permissionMsg{gen: gen, request: request}
 		case <-session.Done():
+			select {
+			case event := <-session.Events: // sent before it exited, such as how it exited
+				return agentEventMsg{gen: gen, event: event}
+			default:
+			}
 			return agentEventMsg{gen: gen, event: acpdriver.Event{Type: acpdriver.EventExit}}
 		}
 	}
 }
 
+// planModeNote leads each message in plan mode. Send stores it with the
+// message, so loadHistory takes it off again.
+const planModeNote = "[Switch plan mode: investigate and plan only. Do not edit files, run mutating commands, or change external state.]\n\n"
+
 func sendPrompt(ctx context.Context, conversation *chat.Chat, text string, mode policy.Mode) tea.Cmd {
 	return func() tea.Msg {
 		if mode == policy.Plan {
-			text = "[Switch plan mode: investigate and plan only. Do not edit files, run mutating commands, or change external state.]\n\n" + text
+			text = planModeNote + text
 		}
 		_, err := conversation.Send(ctx, text)
 		return turnResultMsg{err: err}
@@ -103,8 +112,8 @@ func saveAssistant(ctx context.Context, conversation *chat.Chat, text string) te
 
 func doctorCmd(project string) tea.Cmd {
 	return func() tea.Msg {
-		report, available, err := doctor.Report(project)
-		return doctorResultMsg{report: report, available: available, err: err}
+		report, _, err := doctor.Report(project) // the report names what does not work
+		return doctorResultMsg{report: report, err: err}
 	}
 }
 
@@ -174,28 +183,42 @@ func (m model) listen() tea.Cmd {
 // ignored and its listener stops.
 func (m *model) bumpGen() {
 	m.gen++
+	m.reply = ""
 	if m.listenStop != nil {
 		close(m.listenStop)
 	}
 	m.listenStop = make(chan struct{})
 }
 
-// Update starts the status line's timer when a turn begins and keeps its
-// clock ticking while anything runs.
+// Update sends queued messages once the lead is free, starts the status
+// line's timer when a turn begins, keeps its clock ticking while anything
+// runs, and pings a user who is away once Switch needs them.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	next, cmd := m.update(msg)
 	nm, ok := next.(model)
 	if !ok {
 		return next, cmd
 	}
-	if nm.busy && !m.busy {
+	started := nm.busy && !m.busy
+	nm.team.setRules(nm.rules) // teammates get what the lead gets, whatever changed it
+	// Send writes down the rules it gave as it returns, after the turn's last
+	// event, so the next Send waits for that too.
+	if !nm.busy && !nm.sending && nm.queued != "" && nm.chat != nil {
+		text := nm.queued
+		nm.queued, nm.limited = "", nil // a limit may have lifted
+		nm.appendUser(text)
+		nm.busy, nm.sending, nm.state, started = true, true, "working", true
+		nm.refreshViewport()
+		cmd = tea.Batch(cmd, sendPrompt(nm.ctx, nm.chat, text, nm.permissionMode))
+	}
+	if started {
 		nm.turnStarted, nm.step = time.Now(), ""
 	}
 	if nm.timing() && !nm.clockRunning {
 		nm.clockRunning = true
 		cmd = tea.Batch(cmd, clockTick())
 	}
-	return nm, cmd
+	return nm, tea.Batch(cmd, nm.ping(m))
 }
 
 func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -215,6 +238,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "ctrl+c" {
 			m.shutdown()
 			return m, tea.Quit
+		}
+		// The prompt is drawn over every panel, so it takes the keys.
+		if m.permission != nil {
+			return m.handlePermissionKey(msg)
 		}
 		if m.adapterPicker != nil {
 			switch msg.String() {
@@ -310,6 +337,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.picker.err = choice.Label + " is already the lead"
 					return m, nil
 				}
+				if m.team.status(choice.Agent.Name) == "answering" {
+					m.picker.err = answeringText(choice.Label)
+					return m, nil
+				}
+				if m.busy || m.sending { // a message queued at launch can start a turn while the picker is open
+					m.picker.err = "wait for the current turn to finish"
+					return m, nil
+				}
 				m.picker = nil
 				return m.beginLeadSwitch(choice.Agent)
 			}
@@ -319,18 +354,28 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.modal != "" {
 			switch msg.String() {
 			case "esc", "enter":
+				land := m.modalTitle == landTitle
 				m.modal = ""
 				m.modalTitle = ""
+				switch {
+				case land && (msg.String() == "esc" || m.input.Value() != ""):
+					m.landing = landMsg{} // a no, or an enter meant for the input: the next /land shows it again
+				case land && m.input.Value() == "":
+					// /land's checks again: the lead may have started a turn
+					// since. The panel opens when git answers, maybe as the
+					// user types, and an enter meant for that text is not a yes.
+					return m.handleSlash("/land")
+				}
 				return m, nil
 			}
 			// Let the user type immediately; the first key dismisses the
-			// result panel instead of trapping input behind it.
+			// result panel instead of trapping input behind it. A land panel
+			// closed that way may never have been read, so it is not a yes.
+			if m.modalTitle == landTitle {
+				m.landing = landMsg{}
+			}
 			m.modal = ""
 			m.modalTitle = ""
-		}
-
-		if m.permission != nil {
-			return m.handlePermissionKey(msg)
 		}
 
 		if m.paletteOpen {
@@ -370,6 +415,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key == "ctrl+x":
 			return m.stopFocused()
 		case key == "tab" || key == "shift+tab":
+			if key == "tab" && m.completeMention() {
+				return m, nil
+			}
 			step := 1
 			if key == "shift+tab" {
 				step = -1
@@ -397,6 +445,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "esc":
+			m.unqueue()
 			switch {
 			case m.busy && m.state == "working":
 				_ = m.chat.Session.Cancel(context.Background())
@@ -417,47 +466,57 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.busy {
-				return m, nil
-			}
 			if strings.HasPrefix(text, "/") {
-				return m.handleSlash(text)
+				return m.handleSlash(text) // it refuses, with a notice, what must wait for the lead
+			}
+			if to, question, ok := m.mention(text); ok {
+				return m.askTeammate(to, question)
 			}
 			m.input.Reset()
 			m.paletteOpen = false
 			m.home = false
 			m.setFocus("") // the message goes to the lead, so show its chat
-			m.appendUser(text)
-			if m.chat == nil {
-				// Still connecting: keep the message and send it once the lead is up.
-				m.queued = strings.TrimSpace(m.queued + "\n\n" + text)
-				m.refreshViewport()
-				if m.connectErr != nil {
-					cmd := m.reconnect()
-					return m, cmd
-				}
-				return m, nil
-			}
-			m.busy = true
-			m.state = "working"
+			// Update sends it as soon as the lead is connected and between turns.
+			m.queued = strings.TrimSpace(m.queued + "\n\n" + text)
 			m.refreshViewport()
-			return m, sendPrompt(m.ctx, m.chat, text, m.permissionMode)
+			if m.chat == nil && m.connectErr != nil {
+				cmd := m.reconnect()
+				return m, cmd
+			}
+			return m, nil
 		}
-
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		m.refreshPalette()
-		return m, cmd
+		return m, m.updateInput(msg)
 
 	case tea.WindowSizeMsg:
-		follow := m.viewport.AtBottom() || m.viewport.TotalLineCount() == 0
 		m.width = msg.Width
 		m.height = msg.Height
 		m.layout()
 		m.refreshViewport()
-		if follow {
-			m.viewport.GotoBottom()
+		return m, nil
+
+	case tea.FocusMsg:
+		m.blurred = false
+		return m, nil
+
+	case tea.BlurMsg:
+		m.blurred = true
+		return m, nil
+
+	case askedMsg:
+		if msg.gen != m.gen { // asked in a conversation the user has since left
+			if msg.err != nil {
+				m.fail("ask "+msg.to, msg.err.Error())
+			} else {
+				m.notify(msg.to+" answered", "/agent "+msg.to+" shows it")
+			}
+			return m, nil
 		}
+		if msg.err != nil {
+			addAside(&m.entries, entry{kind: entryError, text: msg.err.Error()})
+		} else {
+			addAside(&m.entries, entry{kind: entryAssistant, who: msg.to, text: msg.reply})
+		}
+		m.refreshViewport()
 		return m, nil
 
 	case connectedMsg:
@@ -486,15 +545,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = "ready"
 		m.loadHistory()
 		m.refreshDashboard()
-		if m.queued != "" {
-			text := m.queued
-			m.queued = ""
-			m.appendUser(text)
-			m.busy = true
-			m.state = "working"
-			m.refreshViewport()
-			return m, tea.Batch(append(m.warmCmds(), m.listen(), sendPrompt(m.ctx, m.chat, text, m.permissionMode))...)
-		}
+		m.reportResume(msg.status)
 		m.refreshViewport()
 		// The lead is up; start the rest of the team in the background.
 		return m, tea.Batch(append(m.warmCmds(), m.listen())...)
@@ -512,36 +563,33 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.gen != m.gen {
 			return m, nil
 		}
-		if m.resolvePolicy(msg.request) {
-			return m, m.listen()
-		}
-		m.permission = msg.request
-		m.permissionResume = m.listen()
-		m.state = "permission"
-		return m, nil
+		m.askPermission(msg.request, m.permissionMode, false)
+		return m, m.listen()
 
 	case jobPermissionMsg:
-		if !(m.permissionMode == policy.Full && strings.Contains(msg.request.Agent, "/")) && m.resolvePolicy(msg.request) {
-			return m, m.waitJob()
+		mode := m.permissionMode
+		if strings.Contains(msg.request.Agent, "/") {
+			mode = m.helperMode() // a worker's subagent
 		}
-		m.permission = msg.request
-		m.permissionResume = m.waitJob()
-		m.state = "permission"
-		return m, nil
+		m.askPermission(msg.request, mode, true)
+		return m, m.waitJob()
 
 	case turnResultMsg:
-		if msg.err != nil {
-			if m.state != "error" {
-				m.appendError(msg.err.Error())
-			}
+		m.sending = false
+		if msg.err == nil {
+			// EventTurn, which Prompt queues behind the reply's last update,
+			// ends the turn; what waited for Send to return can go now.
+			return m.afterTurn()
+		}
+		if m.state != "error" && m.state != "exited" { // the exit said why
+			m.appendError(msg.err.Error())
 			m.state = "error"
-			if reason := acpdriver.LimitReason("", msg.err); reason != "" && m.pendingHandoff == nil {
-				m.limitHandoff(reason)
-			}
-		} else if m.state == "working" {
-			m.state = "ready"
+		}
+		if reason := acpdriver.LimitReason("", msg.err); reason != "" && m.pendingHandoff == nil {
+			m.limitHandoff(reason)
 		}
 		m.busy = false
+		m.unqueue()
 		m.refreshViewport()
 		return m.afterTurn()
 
@@ -576,15 +624,18 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			go msg.session.Close(context.Background())
 			return m, nil
 		}
+		m.team.resetUsage(msg.name) // what it used belonged to a session this one replaces
 		m.team.park(msg.name, msg.session)
 		return m, nil
 
 	case dashboardTickMsg:
 		m.pruneToasts()
-		if m.job == "" {
-			m.refreshDashboard()
-		}
-		return m, tea.Batch(dashboardTick(), gitStatusCmd(m.project))
+		m.reviewRules() // project rules changed outside Switch are shown before they are sent
+		// During a run too: another process may approve its tasks.
+		m.refreshDashboard()
+		m.dropWithdrawn()
+		next, cmd := m.afterTurn() // a handoff waiting for its target to be free
+		return next, tea.Batch(cmd, dashboardTick(), gitStatusCmd(m.project))
 
 	case clockMsg:
 		m.clockRunning = false // Update rearms it while something runs
@@ -598,13 +649,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleStream(msg)
 
 	case teamPermissionMsg:
-		if m.permissionMode != policy.Full && m.resolvePolicy(msg.request) {
-			return m, waitTeamPermission(m.teamPerms)
-		}
-		m.permission = msg.request
-		m.permissionResume = waitTeamPermission(m.teamPerms)
-		m.state = "permission"
-		return m, nil
+		m.askPermission(msg.request, m.helperMode(), false)
+		return m, waitTeamPermission(m.teamPerms)
 
 	case gitStatusMsg:
 		m.branch, m.dirty = msg.branch, msg.dirty
@@ -624,13 +670,27 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setModal(msg.title, msg.body)
 		return m, nil
 
+	case fixShellMsg:
+		return m.checkFix(msg)
+
+	case fixedMsg:
+		m.fixing = ""
+		return m.update(taskActionMsg(msg))
+
+	case landMsg:
+		m.landing = msg // only a preview has a branch to merge
+		m.setModal(msg.title, msg.body)
+		return m, nil
+
 	case jobStreamClosedMsg:
 		return m, nil
 
 	case planResultMsg:
 		m.endJob()
-		if msg.err != nil {
+		if errors.Is(msg.err, context.Canceled) {
 			m.fail("plan failed", msg.err.Error())
+		} else if msg.err != nil {
+			m.setModal("plan failed", msg.err.Error()) // stays up: it can say where the lead's plan was kept
 		} else if msg.result != nil {
 			m.setModal("plan", planSummary(msg.result))
 		}
@@ -638,7 +698,16 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case runResultMsg:
 		m.endJob()
-		m.setModal("run "+msg.outcome, runOutcomeText(msg.outcome, msg.err))
+		body := runOutcomeText(msg.outcome, msg.err)
+		switch {
+		case msg.outcome == execution.RunCompleted && msg.err == nil:
+			body += prDescription(m.ctx, m.store, msg.run) // as a headless run writes it
+		case msg.outcome == execution.RunBlocked || msg.outcome == execution.RunBudget:
+			if waits := m.waits(); waits != "" {
+				body += "\n\n" + waits
+			}
+		}
+		m.setModal("run "+msg.outcome, body)
 		return m, nil
 
 	case doctorResultMsg:
@@ -648,9 +717,6 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.fail("doctor failed", msg.err.Error())
 		} else {
 			m.setModal("doctor", msg.report)
-			if !msg.available {
-				m.state = "agent unavailable"
-			}
 		}
 		return m, nil
 
@@ -663,6 +729,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.chat = msg.chat
 		m.status = msg.status
+		m.team.resetUsage(m.lead.Name)
+		m.ctxUsed, m.ctxSize = 0, 0
 		m.loadHistory() // a new session starts with an empty transcript
 		m.refreshViewport()
 		m.refreshDashboard()
@@ -691,6 +759,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.persistLead(m.previousLead.Name)
 			}
 			m.team.park(msg.agent.Name, msg.adopted)
+			if h := m.handoff; h != nil { // the old lead was told h.to takes over
+				note := h.to + " could not take over from " + h.from + ", whose handoff note was: " + h.note
+				_ = m.chat.Note(m.ctx, note)
+				m.appendSystem(note)
+				m.refreshViewport()
+			}
 			m.handoff = nil
 			m.fail("lead switch failed", msg.err.Error())
 			return m, m.listen()
@@ -700,19 +774,58 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = msg.status
 		_ = m.persistLead(msg.agent.Name)
 		m.team.setLead(msg.agent.Name)
+		if msg.adopted == nil {
+			m.team.resetUsage(msg.agent.Name) // a new session; a warm one keeps what it used
+		}
+		limits := m.team.Limits(msg.agent.Name)
+		m.ctxUsed, m.ctxSize = limits.Used, limits.Size
 		m.team.park(m.previousLead.Name, msg.previous) // instant to switch back
 		// The new lead has its own session, so its transcript starts fresh.
 		note := fmt.Sprintf("%s (%s) is now the lead", msg.agent.Name, msg.agent.Driver)
 		_ = m.chat.Note(m.ctx, note)
+		if m.handoff == nil {
+			m.handoff = m.recap() // the user switched leads
+		}
 		m.loadHistory()
 		m.refreshViewport()
 		m.refreshDashboard()
 		m.notify(msg.agent.Name+" is now the lead", msg.agent.Driver)
 		m, deliver := m.deliverHandoff()
 		return m, tea.Batch(m.listen(), deliver)
-	}
 
-	return m, nil
+	default:
+		// Pastes, and the input's own messages: ctrl+v's clipboard read and
+		// the cursor blink. A list takes no text, so a paste is dropped while
+		// one is open. The input is one line: pasted newlines become spaces.
+		// They go to a question's answer while the user types one.
+		if m.answering() {
+			var cmd tea.Cmd
+			m.answer, cmd = m.answer.Update(msg)
+			return m, cmd
+		}
+		if _, paste := msg.(tea.PasteMsg); paste && (m.adapterPicker != nil || m.rulesManager != nil || m.sessionPicker != nil || m.taskPicker != nil || m.picker != nil) {
+			return m, nil
+		}
+		return m, m.updateInput(msg)
+	}
+}
+
+// updateInput hands msg to the input and keeps the command palette in step
+// with its text.
+func (m *model) updateInput(msg tea.Msg) tea.Cmd {
+	value := m.input.Value()
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	if m.input.Value() != value {
+		m.refreshPalette()
+	}
+	return cmd
+}
+
+// answeringText says why a teammate cannot lead yet: the session answering
+// is in use, and a switch would start a second one beside it.
+func answeringText(name string) string {
+	return name + " is answering a question; make it the lead once it has answered"
 }
 
 // beginLeadSwitch shows the new lead optimistically and starts its session in
@@ -720,6 +833,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) beginLeadSwitch(agent config.Agent) (tea.Model, tea.Cmd) {
 	if m.chat == nil {
 		m.notify("still connecting", m.lead.Name+" is still connecting; switch once it is ready")
+		return m, nil
+	}
+	if m.busy || m.sending { // switching copies the Chat that a Send still writes to
+		m.notify("busy", "wait for the current turn to finish")
 		return m, nil
 	}
 	m.previousLead = m.lead
@@ -813,9 +930,17 @@ func (m model) handlePaletteEnter() (tea.Model, tea.Cmd) {
 func (m model) handleAgentEvent(event acpdriver.Event) (tea.Model, tea.Cmd) {
 	switch event.Type {
 	case acpdriver.EventMessage, acpdriver.EventThought, acpdriver.EventToolCall, acpdriver.EventToolEdit, acpdriver.EventPlan:
+		if event.Type == acpdriver.EventMessage && event.Text != "" {
+			if n := len(m.entries); m.reply != "" && (n == 0 || !m.entries[n-1].open || m.entries[n-1].kind != entryAssistant) {
+				m.reply += "\n\n" // the reply goes on after a tool call or a thought
+			}
+			m.reply += event.Text
+		}
 		applyEvent(&m.entries, event)
 		m.step = strings.ToLower(activity(m.entries))
-		m.refreshViewport()
+		if !m.busy { // while the lead works, the clock redraws: events come faster than redraws
+			m.refreshViewport()
+		}
 		return m, m.listen()
 
 	case acpdriver.EventUsage:
@@ -826,7 +951,9 @@ func (m model) handleAgentEvent(event acpdriver.Event) (tea.Model, tea.Cmd) {
 		return m, m.listen()
 
 	case acpdriver.EventTurn:
-		text := m.closeAssistant()
+		m.closeAssistant()
+		text := m.reply
+		m.reply = ""
 		m.busy = false
 		m.state = "ready"
 		if reason := acpdriver.LimitReason(event.StopReason, nil); reason != "" && m.pendingHandoff == nil {
@@ -844,16 +971,24 @@ func (m model) handleAgentEvent(event acpdriver.Event) (tea.Model, tea.Cmd) {
 	case acpdriver.EventError:
 		if event.Err != nil {
 			m.appendError(event.Err.Error())
-			m.refreshViewport()
 		}
 		m.busy = false
 		m.state = "error"
+		m.reply = ""
+		m.unqueue()
+		m.refreshViewport()
 		return m, m.listen()
 
 	case acpdriver.EventExit:
-		m.appendSystem("agent exited")
+		if event.Err != nil { // how it exited and the end of its stderr
+			m.appendError(event.Err.Error())
+		} else {
+			m.appendSystem("agent exited")
+		}
 		m.busy = false
 		m.state = "exited"
+		m.reply = ""
+		m.unqueue()
 		m.refreshViewport()
 		return m, nil
 	}
@@ -882,37 +1017,61 @@ func adapterAvailable(name string) bool {
 }
 
 func (m model) handlePermissionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "esc" {
-		m.permission.Cancel()
-	} else {
-		index, err := strconv.Atoi(msg.String())
-		if err != nil || index < 1 || index > len(m.permission.Options) {
-			return m, nil
+	key := msg.String()
+	typed := strings.TrimSpace(m.answer.Value()) // only a question without options takes one
+	choice, err := strconv.Atoi(key)
+	answer := key == "esc" || err == nil && choice >= 1 && choice <= len(m.permission.Options) || key == "enter" && typed != ""
+	if !answer {
+		if m.answering() {
+			var cmd tea.Cmd
+			m.answer, cmd = m.answer.Update(msg)
+			return m, cmd
 		}
-		m.permission.Respond(m.permission.Options[index-1].ID)
+		// The prompt can open while the user types: typing goes on in the
+		// input and holds answers off until it pauses.
+		m.permissionHold = time.Now().Add(permissionPause)
+		return m, m.updateInput(msg)
 	}
-	resume := m.permissionResume
-	m.permission = nil
-	m.permissionResume = nil
+	if time.Now().Before(m.permissionHold) {
+		if key != "esc" && key != "enter" && m.input.Value() != "" { // a digit in the message being typed
+			m.permissionHold = time.Now().Add(permissionPause)
+			return m, m.updateInput(msg)
+		}
+		return m, nil // pressed before the prompt could be read: never picks an option
+	}
 	switch {
-	case m.job == "plan":
-		m.state = "planning"
-	case m.job == "run" && !m.busy:
-		m.state = "running"
+	case key == "esc":
+		m.permission.Resolve(acpdriver.PermissionDeny) // reject, not ACP's "cancelled": that says the whole turn was cancelled
+	case key == "enter":
+		m.permission.Respond(typed)
 	default:
-		m.state = "working"
+		m.permission.Respond(m.permission.Options[choice-1].ID)
 	}
-	return m, resume
+	m.nextPermission()
+	return m, nil
+}
+
+// unqueue puts messages still waiting for the lead back in the input, to be
+// edited or sent again.
+func (m *model) unqueue() {
+	if m.queued == "" {
+		return
+	}
+	m.input.SetValue(strings.TrimSpace(m.queued + " " + m.input.Value()))
+	m.input.CursorEnd()
+	m.queued = ""
+	m.refreshViewport()
 }
 
 func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	m.paletteOpen = false
-	m.input.Reset()
+	m.input.SetValue(text) // a command that has to wait stays in the input, whole
+	m.input.CursorEnd()
 	fields := strings.Fields(text)
 	command := fields[0]
 	switch command {
-	case "/plan", "/run", "/doctor", "/lead", "/adapters", "/new", "/resume":
-		if m.busy {
+	case "/plan", "/run", "/doctor", "/lead", "/adapters", "/new", "/resume", "/session", "/land":
+		if m.busy || m.sending { // a Send that has not returned still writes to this session
 			m.notify("busy", "wait for the current turn to finish")
 			return m, nil
 		}
@@ -924,21 +1083,34 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "/plan", "/run", "/adapters":
-		// Never plan, start a second run, or install adapters mid-run.
-		if m.job == "run" {
+		// Never plan, start a second run, or install adapters mid-run,
+		// detached runs included.
+		if m.job == "run" || m.runOwner > 0 {
 			m.notify("run in progress", "/stop ends the run first")
 			return m, nil
 		}
-	case "/tasks", "/review", "/agents", "/log", "/approve", "/reject", "/retry", "/diff":
+		if command == "/run" && m.fixing != "" { // its recovery would hand the task being checked back to a worker
+			m.notify("checking your fix of "+shortTaskID(m.fixing), "/run waits for its check to finish")
+			return m, nil
+		}
+		// The TUI shows only the newest run, so a new plan hides this one.
+		if queued, active, review, _, blocked := m.taskCounts(); command == "/plan" && m.run != nil &&
+			queued+active+review+blocked > 0 && m.planWarned != m.run.ID {
+			m.planWarned = m.run.ID
+			m.notify("the run is not finished", "a new plan hides its "+plural(queued+active+review+blocked, "unmerged task")+" · enter again to plan anyway")
+			return m, nil
+		}
+	case "/tasks", "/review", "/agents", "/log", "/approve", "/reject", "/retry", "/fix", "/diff", "/why", "/land":
 		if m.run == nil {
 			m.notify("no run yet", "/plan <goal> or /plan --file <path> creates one")
 			return m, nil
 		}
 	}
+	m.input.Reset()
 	switch command {
 	case "/mode":
 		if len(fields) == 1 {
-			m.setModal("permission mode", fmt.Sprintf("Current: %s\n\n/mode build — allow reported reads; ask for other operations\n/mode plan — allow reported reads; deny other operations\n/mode full — automatically allow reported requests for this session\n\nThese policies apply only when an adapter requests permission; they are not a sandbox. Task merges always require your approval. Detached runs use their own --allow setting.", m.permissionMode))
+			m.setModal("permission mode", fmt.Sprintf("Current: %s\n\n/mode build — allow reads in the agent's own folder; ask for other operations\n/mode plan — allow reads in the agent's own folder; deny other operations\n/mode full — automatically allow reported requests for this session\n\nThese policies apply only when an adapter requests permission; they are not a sandbox. Task merges always require your approval. Detached runs answer as build mode does, with their --allow setting where it would ask.", m.permissionMode))
 			break
 		}
 		mode, ok := policy.Parse(fields[1])
@@ -985,6 +1157,23 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	case "/agent":
 		m.openAgent(strings.Join(fields[1:], " "))
 
+	case "/steer":
+		to, message, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(text, "/steer")), " ")
+		if message = strings.TrimSpace(message); message == "" {
+			m.notify("usage", "/steer <agent> <text>")
+			break
+		}
+		t, ctx := m.team, m.ctx
+		return m, func() tea.Msg { // an adapter round trip, off the UI goroutine
+			steerCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			reply, err := t.Steer(steerCtx, to, message)
+			if err != nil {
+				return taskActionMsg{title: "steer failed", body: err.Error()}
+			}
+			return taskActionMsg{title: "steer " + to, body: reply}
+		}
+
 	case "/rules":
 		if len(fields) > 1 {
 			m.previewRules(fields[1])
@@ -996,23 +1185,23 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.openSessionPicker()
 
 	case "/plan":
-		if len(fields) < 2 {
-			m.notify("usage", "/plan <goal>  or  /plan --file <path>")
-			break
-		}
-		var goal, file string
-		if fields[1] == "--file" {
+		var goal, file, conversation string
+		if len(fields) > 1 && fields[1] == "--file" {
 			if len(fields) < 3 {
 				m.notify("usage", "/plan --file <path>")
 				break
 			}
 			file, _ = filepath.Abs(fields[2])
 		} else {
-			goal = strings.TrimSpace(strings.TrimPrefix(text, "/plan"))
+			goal, conversation = strings.TrimSpace(strings.TrimPrefix(text, "/plan")), m.conversation()
+			if goal == "" && conversation == "" {
+				m.notify("nothing to plan from yet", "/plan <goal>, or talk the goal over with "+m.lead.Name+" first")
+				break
+			}
 		}
 		ctx := m.startJob("plan", "planning", true)
 		return m, tea.Batch(
-			startPlanCmd(ctx, m.project, goal, file, m.lead, m.rules, m.jobStream),
+			startPlanCmd(ctx, m.project, goal, file, conversation, m.lead, m.rules, m.jobStream),
 			m.waitJob(),
 		)
 
@@ -1025,8 +1214,11 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 			m.notify("no run yet", "/plan <goal> or /plan --file <path> first")
 			break
 		}
-		if m.runOwner > 0 {
-			m.setModal("run in progress", fmt.Sprintf("pid %d is driving this run in the background\n\n/tasks and /review approve its work · /stop stops it", m.runOwner))
+		m.refreshDashboard() // an accepted proposal gives a completed run work again
+		// Its checks passed; running them again, maybe after /land and a prune
+		// removed its worktree, could only flip a landed run to blocked.
+		if queued, active, review, _, _ := m.taskCounts(); m.run.Status == execution.RunCompleted && queued+active+review == 0 {
+			m.notify("the run is complete", "/land merges it into your branch")
 			break
 		}
 		if len(fields) > 1 && fields[1] == "--detach" {
@@ -1034,7 +1226,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 			if len(fields) > 2 && fields[2] == "--allow" {
 				permission = "allow"
 			}
-			return m, detachCmd(m.project, m.run.ID, permission)
+			return m, detachCmd(m.project, m.run.ID, permission, m.rulesDeclined)
 		}
 		ctx := m.startJob("run", "running", false)
 		engine, server, err := m.startRun(ctx)
@@ -1045,7 +1237,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		}
 		m.engine = engine
 		m.home = false
-		return m, tea.Batch(runEngineCmd(ctx, engine, server, m.jobStream), m.waitJob())
+		return m, tea.Batch(runEngineCmd(ctx, engine, server, m.run.ID, m.jobStream), m.waitJob())
 
 	case "/stop":
 		switch {
@@ -1078,7 +1270,37 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	case "/agents":
 		m.setModal("agents", m.agentsContent())
 
+	case "/why":
+		if waits := m.waits(); waits != "" {
+			m.setModal("why tasks wait", waits)
+		} else if queued, active, review, _, blocked := m.taskCounts(); m.run.Status == execution.RunBlocked && queued+active+review+blocked == 0 {
+			m.notify("the run is blocked", "every task is merged, but the run's own checks failed · /log shows why · /run runs them again")
+		} else {
+			m.notify("nothing waits", "every task is merged or under way")
+		}
+
+	case "/land":
+		queued, active, review, _, blocked := m.taskCounts()
+		switch {
+		case m.run.Status != execution.RunCompleted && queued+active+review+blocked == 0:
+			// Approvals without /run merge tasks; only a run runs its own checks.
+			m.notify("the run is not complete", "every task is merged · /run completes it once the run's checks pass")
+		case m.run.Status != execution.RunCompleted:
+			m.notify("the run is not complete", "/land merges a completed run · /why says what waits")
+		case m.landing.branch == m.run.IntegrationBranch:
+			cmd := m.land()
+			return m, cmd
+		default:
+			return m, landPreviewCmd(m.project, *m.run)
+		}
+
 	case "/log":
+		if m.job == "run" { // the run log panel shows only the end of the output
+			m.setModal("run log", m.jobLogText())
+			total, room := m.modalLines()
+			m.modalTop = max(0, total-room)
+			break
+		}
 		m.setModal("run log", m.logContent())
 
 	case "/approve", "/retry", "/diff":
@@ -1087,6 +1309,19 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 			break
 		}
 		task, ok := m.findTask(fields[1])
+		if !ok && command == "/approve" && fields[1] == "all" { // a task named all is approved alone
+			var ids []string // in plan order, as the store lists them
+			for _, task := range m.tasks {
+				if task.Status == execution.StatusReview {
+					ids = append(ids, task.ID)
+				}
+			}
+			if len(ids) == 0 {
+				m.notify("nothing to approve", "no task is waiting for review")
+				break
+			}
+			return m, m.approveAll(ids)
+		}
 		if !ok {
 			m.fail("unknown task "+fields[1], "/tasks lists them")
 			break
@@ -1105,6 +1340,13 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		}
 		reason := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(text, "/reject")), fields[1]))
 		return m, m.taskAction("reject", task.ID, reason)
+
+	case "/fix":
+		if len(fields) < 2 {
+			m.notify("usage", "/fix <task>")
+			break
+		}
+		return m.fixTask(fields[1])
 
 	case "/doctor":
 		m.busy = true
@@ -1135,6 +1377,8 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 			m.fail(agent.Name+" is unavailable", "its adapter "+agent.Driver+" is not installed; /adapters installs it")
 		case agent.Name == m.lead.Name:
 			m.notify(agent.Name+" is already the lead", "")
+		case m.team.status(agent.Name) == "answering":
+			m.notify("wait for "+agent.Name, answeringText(agent.Name))
 		default:
 			return m.beginLeadSwitch(agent)
 		}
@@ -1154,6 +1398,22 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.busy = true
 		m.state = "new session"
 		return m, newSessionCmd(m.ctx, m.chat)
+
+	case "/copy":
+		code := len(fields) > 1 && fields[1] == "code"
+		text, what := m.lastReply(code), "reply"
+		if code {
+			what = "code block"
+		}
+		if strings.TrimSpace(text) == "" {
+			m.notify("nothing to copy", "no "+what+" here yet")
+			break
+		}
+		m.notify("copied", "the last "+what)
+		return m, tea.SetClipboard(text) // OSC 52, which the terminal must allow
+
+	case "/remember":
+		m.remember(strings.TrimSpace(strings.TrimPrefix(text, "/remember")))
 
 	case "/help":
 		m.setModal("help", helpText())
@@ -1184,6 +1444,9 @@ func planSummary(result *planning.Result) string {
 		fmt.Fprintf(&b, "  %-12s %-8s deps=%-12s %s\n", task.ID, task.Role, deps, task.Title)
 	}
 	fmt.Fprintf(&b, "worktrees: %s", truncate(result.Root, 56))
+	if result.Uncommitted > 0 {
+		fmt.Fprintf(&b, "\nwarning: %d uncommitted changes are not in this run; workers start from the last commit", result.Uncommitted)
+	}
 	return b.String()
 }
 
@@ -1198,6 +1461,5 @@ func (m *model) reconnect() tea.Cmd {
 // toggleZen hides or shows the sidebar so the conversation gets the full width.
 func (m *model) toggleZen() {
 	m.zen = !m.zen
-	m.layout()
 	m.refreshViewport()
 }

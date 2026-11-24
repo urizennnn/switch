@@ -117,3 +117,27 @@ func TestSessionsListsResumableSessions(t *testing.T) {
 		t.Fatalf("summaries = %+v", sessions)
 	}
 }
+
+func TestSaveTaskFromOnlyMovesATaskStillInThatStatus(t *testing.T) {
+	state, err := Open(filepath.Join(t.TempDir(), "switch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	ctx := context.Background()
+	task := Task{ID: "r:a", RunID: "r", Title: "a", Status: "review"}
+	if err := state.SaveTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	task.Status, task.LastError = "approved", "x"
+	if ok, err := state.SaveTaskFrom(ctx, task, "review"); !ok || err != nil {
+		t.Fatalf("SaveTaskFrom(review) = %v, %v", ok, err)
+	}
+	task.Status = "queued"
+	if ok, err := state.SaveTaskFrom(ctx, task, "review"); ok || err != nil {
+		t.Fatalf("a second move out of review = %v, %v; want refused", ok, err)
+	}
+	if got, _, _ := state.GetTask(ctx, "r:a"); got.Status != "approved" || got.LastError != "x" || got.Title != "a" {
+		t.Fatalf("task = %+v", got)
+	}
+}

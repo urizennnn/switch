@@ -18,7 +18,7 @@ import (
 	"github.com/urizennnn/switch/internal/store"
 )
 
-// Run executes `switch chat` and returns a process exit code.
+// Run executes `switch __control chat` and returns a process exit code.
 func Run(args []string) int {
 	fs := flag.NewFlagSet("chat", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -49,6 +49,7 @@ func Run(args []string) int {
 		fmt.Fprintf(os.Stderr, "chat: %v\n", err)
 		return 1
 	}
+	project = config.ProjectRoot(project)
 
 	cfg, created, err := config.LoadOrInit(project)
 	if err != nil {
@@ -85,6 +86,11 @@ func Run(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	ruleSet = ruleSet.Trust(func() (string, error) { return state.TrustedRules(ctx, project) })
+	if ruleSet.Untrusted() {
+		fmt.Fprintln(os.Stderr, "chat: "+rules.UntrustedNote)
+	}
+
 	var logs io.Writer
 	if *agentLogs {
 		logs = os.Stderr
@@ -104,7 +110,7 @@ func Run(args []string) int {
 	}
 	defer conversation.Close(context.Background())
 
-	printStatus(conversation, status, ruleSet)
+	printStatus(conversation, status)
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
@@ -118,7 +124,7 @@ func Run(args []string) int {
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
-			switch handleCommand(ctx, conversation, ruleSet, reader, line) {
+			switch handleCommand(ctx, conversation, reader, line) {
 			case commandQuit:
 				return 0
 			case commandContinue:
@@ -142,7 +148,7 @@ const (
 	commandQuit
 )
 
-func handleCommand(ctx context.Context, conversation *chat.Chat, ruleSet rules.Set, reader *bufio.Reader, line string) commandResult {
+func handleCommand(ctx context.Context, conversation *chat.Chat, reader *bufio.Reader, line string) commandResult {
 	fields := strings.Fields(line)
 	command := fields[0]
 	switch command {
@@ -156,6 +162,11 @@ func handleCommand(ctx context.Context, conversation *chat.Chat, ruleSet rules.S
   /quit         exit
 Anything else is sent to the agent.`)
 	case "/rules":
+		ruleSet, err := conversation.EffectiveRules()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "chat: %v\n", err)
+			return commandContinue
+		}
 		if ruleSet.Empty() {
 			fmt.Println("no rules loaded")
 			return commandContinue
@@ -223,6 +234,9 @@ func runTurn(ctx context.Context, conversation *chat.Chat, reader *bufio.Reader,
 					fmt.Fprintf(os.Stderr, "\nchat: %v\n", event.Err)
 				}
 			case acpdriver.EventExit:
+				if event.Err != nil { // how it exited and the end of its stderr
+					return event.Err
+				}
 				return fmt.Errorf("adapter exited")
 			}
 
@@ -255,20 +269,8 @@ func respondPermission(request *acpdriver.PermissionRequest, reader *bufio.Reade
 		fmt.Printf("  %d. %s (%s)\n", i+1, option.Name, option.Kind)
 	}
 
-	switch mode {
-	case acpdriver.PermissionAllow:
-		if id := findOption(request.Options, "allow"); id != "" {
-			request.Respond(id)
-		} else {
-			request.Cancel()
-		}
-		return
-	case acpdriver.PermissionDeny:
-		if id := findOption(request.Options, "reject"); id != "" {
-			request.Respond(id)
-		} else {
-			request.Cancel()
-		}
+	if mode == acpdriver.PermissionAllow || mode == acpdriver.PermissionDeny {
+		request.Resolve(mode) // one-shot options only, as everywhere else
 		return
 	}
 
@@ -296,21 +298,12 @@ func respondPermission(request *acpdriver.PermissionRequest, reader *bufio.Reade
 	request.Respond(request.Options[index].ID)
 }
 
-func findOption(options []acpdriver.PermissionOption, prefix string) string {
-	for _, option := range options {
-		if strings.HasPrefix(option.Kind, prefix) {
-			return option.ID
-		}
-	}
-	return ""
-}
-
 func readLine(reader *bufio.Reader, prompt string) (string, error) {
 	fmt.Print(prompt)
 	return reader.ReadString('\n')
 }
 
-func printStatus(conversation *chat.Chat, status chat.Status, ruleSet rules.Set) {
+func printStatus(conversation *chat.Chat, status chat.Status) {
 	fmt.Printf("switch chat\n")
 	fmt.Printf("agent:   %s\n", status.Agent)
 	if status.Model != "" {
@@ -324,9 +317,13 @@ func printStatus(conversation *chat.Chat, status chat.Status, ruleSet rules.Set)
 	if status.ResumeError != nil {
 		fmt.Printf("resume:  failed, started new session (%v)\n", status.ResumeError)
 	}
-	if ruleSet.Empty() {
+	// What the lead is sent, so project rules left out are not listed.
+	switch ruleSet, err := conversation.EffectiveRules(); {
+	case err != nil:
+		fmt.Printf("rules:   %v\n", err)
+	case ruleSet.Empty():
 		fmt.Println("rules:   none loaded")
-	} else {
+	default:
 		scopes := make([]string, 0, len(ruleSet.Sources))
 		for _, source := range ruleSet.Sources {
 			scopes = append(scopes, source.Scope)
